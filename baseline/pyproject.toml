@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oreo-qwen-baseline"
+version = "0.1.0"
+description = "OreoLM Knowledge Interaction Layer baseline for Qwen3"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.14.0",
+    "transformers>=5.17.0,<6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["oreo_qwen*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
