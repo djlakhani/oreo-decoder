@@ -1,6 +1,28 @@
-"""Public Phase 1 interfaces for the Oreo-Qwen baseline."""
+"""Public interfaces for the Oreo-Qwen baseline."""
 
+from .configuration import OreoQwen3Config
 from .contracts import ContractError, KGContractSpec, KGInputBatch, OreoQwenBatch
+from .modeling import (
+    OreoBaseModelOutputWithPast,
+    OreoCausalLMOutputWithPast,
+    OreoQwen3ForCausalLM,
+    OreoQwen3Model,
+    register_oreo_tokens_and_resize,
+)
+from .reasoner import (
+    EntityLinker,
+    EntityMemory,
+    GlobalInverseDegreeWalker,
+    KGInitializationOutput,
+    KGReasoner,
+    KGReasonerConfig,
+    KGReasonerState,
+    KGStepOutput,
+    KnowledgeFusion,
+    RelationMemory,
+    RelationRouter,
+    ValueProjection,
+)
 from .tokens import (
     KG_ANSWER_TOKEN,
     KG_MASK_TOKENS,
@@ -15,9 +37,27 @@ from .tokens import (
 
 __all__ = [
     "ContractError",
+    "OreoQwen3Config",
     "KGContractSpec",
     "KGInputBatch",
     "OreoQwenBatch",
+    "EntityLinker",
+    "EntityMemory",
+    "GlobalInverseDegreeWalker",
+    "KGInitializationOutput",
+    "KGReasoner",
+    "KGReasonerConfig",
+    "KGReasonerState",
+    "KGStepOutput",
+    "KnowledgeFusion",
+    "RelationMemory",
+    "RelationRouter",
+    "ValueProjection",
+    "OreoBaseModelOutputWithPast",
+    "OreoCausalLMOutputWithPast",
+    "OreoQwen3ForCausalLM",
+    "OreoQwen3Model",
+    "register_oreo_tokens_and_resize",
     "KG_ANSWER_TOKEN",
     "KG_MASK_TOKENS",
     "KG_RECONSTRUCT_TOKEN",
@@ -28,4 +68,3 @@ __all__ = [
     "OreoSpecialTokenIds",
     "register_oreo_special_tokens",
 ]
-

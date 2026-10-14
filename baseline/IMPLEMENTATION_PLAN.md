@@ -218,6 +218,10 @@ is not a third training stage.
   positions, initialization modes, auxiliary-target masks, and invalid inputs.
 - Leave SSM corruption, QA serialization, collators, and all real dataset
   construction to Phase 4.
+- Deferred consideration: prompt-only inference batches are accepted, but Phase
+  1 does not require validation that `<|kg_answer|>` is the final active prompt
+  token. Add a mode-aware inference-delimiter check later if stricter generation
+  preflight validation proves useful.
 - Stop for review and revisions.
 
 ### Phase 2 — KG Reasoner
