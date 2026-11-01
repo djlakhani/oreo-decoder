@@ -8,9 +8,15 @@ version = "0.1.0"
 description = "OreoLM Knowledge Interaction Layer baseline for Qwen3"
 requires-python = ">=3.10"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "numpy>=1.26.0",
+    "requests>=2.34.2",
     "torch>=2.14.0",
     "transformers>=5.17.0,<6",
 ]
+
+[project.scripts]
+wikidata5m-index = "oreo_qwen.wikidata5m.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
@@ -22,4 +28,9 @@ include = ["oreo_qwen*"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]
 
