@@ -151,11 +151,11 @@ Suppose both questions require two hops:
 
 ```text
 Example 0:
-Where was <|s_ent|> Albert Einstein <|rel|> <|t_ent|>
+Where was Albert Einstein <|s_ent|> <|rel|> <|t_ent|>
 born, and in which country is that city? <|kg_answer|> Germany EOS
 
 Example 1:
-Where was <|s_ent|> Marie Curie <|rel|> <|t_ent|>
+Where was Marie Curie <|s_ent|> <|rel|> <|t_ent|>
 born, and in which country is that city? <|kg_answer|> Poland EOS
 ```
 
@@ -193,15 +193,15 @@ Assume the illustrative tokenization gives the following marker positions in
 both sequences:
 
 ```text
-position:  0     1    2          3       4        5       6
-token:     Where was  <|s_ent|>  Albert  Einstein <|rel|> <|t_ent|>
+position:  0     1    2       3         4          5       6
+token:     Where was  Albert  Einstein  <|s_ent|>  <|rel|> <|t_ent|>
 ```
 
 Then:
 
 ```python
 kg_mention_batch = torch.tensor([0, 1])
-kg_src_positions = torch.tensor([2, 2])
+kg_src_positions = torch.tensor([4, 4])
 kg_rel_positions = torch.tensor([5, 5])
 kg_tgt_positions = torch.tensor([6, 6])
 
@@ -270,31 +270,57 @@ resized, and the resulting token IDs are persisted in `OreoQwen3Config`.
 ### Stage 1: salient-span reconstruction pretraining
 
 ```text
-<marked passage containing unique sentinels> <|kg_reconstruct|>
-<|kg_mask_0|> <span 0> <|kg_mask_1|> <span 1> ... EOS
+system: Reconstruct each masked span. Return only each sentinel followed by
+        its original text, in sentinel order.
+user: <marked passage containing unique sentinels>
+assistant: <|kg_reconstruct|> <|kg_mask_0|> <span 0>
+           <|kg_mask_1|> <span 1> ... EOS
 ```
 
-Everything from the first passage token through `<|kg_reconstruct|>` is prompt
-context and has label `-100`. Every token after the delimiter, beginning with
-the first `<|kg_mask_0|>`, is supervised. This includes each suffix sentinel,
-every reconstructed span token, and EOS.
+The model's instruct chat template supplies the role/control tokens. Everything
+from the first system token through `<|kg_reconstruct|>`, which is the first
+token in the assistant response, has label `-100`. Every token after that
+delimiter, beginning with the first suffix sentinel, is supervised. This
+includes each suffix sentinel, the exact removed surface tokens, and EOS. A
+formatting mistake in the prompt or delimiter is therefore never an LM-loss
+target.
+
+Every visible resolved entity occurrence is serialized in this order:
+
+```text
+entity surface <|s_ent|> <|rel|> <|t_ent|>
+```
+
+Masked entity occurrences and context-only blanks contain only their unique
+sentinel; they have no surrounding KG markers.
 
 For example:
 
 ```text
-<|s_ent|> Albert Einstein <|rel|> <|t_ent|> was born in
-<|kg_mask_0|>. <|kg_mask_1|> is located in Germany.
-<|kg_reconstruct|> <|kg_mask_0|> Ulm <|kg_mask_1|> Ulm EOS
+user: Albert Einstein <|s_ent|> <|rel|> <|t_ent|> was born in
+      <|kg_mask_0|>. <|kg_mask_1|> is located in Germany.
+assistant: <|kg_reconstruct|> <|kg_mask_0|> Ulm
+           <|kg_mask_1|> Ulm EOS
 ```
 
 The two occurrences of `Ulm` receive different sentinels even though they link
-to the same entity. The existing Wikipedia text, character-level hyperlink
-spans, entity IDs, local graphs, and weak relation paths can be reused, but the
-passage must be retokenized with the Qwen tokenizer and all token positions and
-labels must be rebuilt.
+to the same entity. Stage-1 training reconstructs exactly what the source text
+contained; aliases are not alternate training labels. The Wikidata5M
+preprocessor defined in `PREPROCESS_WIKI5M.md` discovers mentions from the
+indexed passage, local train graph, and candidate aliases. It does not assume
+that hyperlink annotations already exist. Its character-level record must be
+retokenized with the Qwen tokenizer, and all token positions and labels must be
+built after chat serialization and any tokenizer-budgeted crop.
 
 Core KG tensors are required in this stage. Entity-link and relation-path targets
 are supplied when the preprocessing pipeline can derive them.
+
+Stage-1 evaluation metadata stays outside `model.forward`. Each sentinel stores
+its exact removed text, mask kind, and optional gold QID. A separate evaluator
+may report exact-surface, normalized-text, alias-aware, format-validity, and
+per-mask-kind accuracy. Alias-aware scoring resolves a prediction against the
+gold QID's aliases; it does not change teacher-forced reconstruction loss or add
+aliases to model tensors.
 
 ### Stage 2: benchmark adaptive QA fine-tuning
 

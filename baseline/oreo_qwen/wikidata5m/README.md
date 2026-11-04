@@ -352,10 +352,62 @@ The builder writes to a hidden staging directory inside `indexed/`, validates
 the completed artifacts, moves them into place, and publishes `manifest.json`
 last. A partial build therefore cannot be mistaken for a complete index.
 
-## Current boundary
+## Reconstruction preprocessing
 
-This package supplies graph candidates, passages, and aliases. It does not yet
-perform entity mention matching, ambiguity resolution, span selection,
-corruption, local-graph construction, or training-example serialization. Those
-belong to the next preprocessing layer and should consume this datastore rather
-than reading the source triple files directly.
+The `preprocessing` subpackage implements the passage-level contract in
+`baseline/PREPROCESS_WIKI5M.md`. It obtains every passage, alias tuple, ID
+mapping, and train edge through `Wikidata5MStore`; it never scans the raw triple
+files or creates a second global alias index.
+
+Inspect one passage without writing artifacts:
+
+```bash
+uv run wikidata5m-preprocess inspect \
+  ../../datasets/Wikidata5M/indexed --qid Q29387131
+```
+
+The result includes acceptance or rejection, matching diagnostics, resolved
+mentions, the local train graph, target groups, corrupted passage, and exact
+reconstruction suffix.
+
+Build a bounded range while reviewing the pipeline:
+
+```bash
+uv run wikidata5m-preprocess build ../../datasets/Wikidata5M \
+  --start-id 0 --stop-id 10000
+```
+
+The default output is
+`datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1/`. Shards are
+deterministic gzip JSONL files over fixed dense entity-ID ranges. Publication is
+atomic, a progress manifest makes completed shards resumable, and the final
+manifest records checksums, counts, rejection reasons, and bounded rejection
+samples. This command can process the full corpus, so do not run it casually.
+
+Inspect corpus statistics and validate artifacts:
+
+```bash
+uv run wikidata5m-preprocess stats \
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1
+
+uv run wikidata5m-preprocess validate \
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1
+
+uv run wikidata5m-preprocess validate \
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1 \
+  --full --source ../../datasets/Wikidata5M
+```
+
+Python callers normally use:
+
+```python
+from oreo_qwen.wikidata5m.preprocessing import preprocess_passage, render_example
+
+result = preprocess_passage(store, "Q5")
+if result.record is not None:
+    rendered = render_example(result.record, store.require_passage("Q5"))
+```
+
+The stored record is deliberately untokenized. Tokenizer-budgeted cropping,
+chat-template conversion, tensor batching, model initialization, and training
+remain downstream concerns.

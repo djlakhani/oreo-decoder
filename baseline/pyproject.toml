@@ -17,6 +17,8 @@ dependencies = [
 
 [project.scripts]
 wikidata5m-index = "oreo_qwen.wikidata5m.cli:main"
+wikidata5m-preprocess = "oreo_qwen.wikidata5m.preprocessing.cli:main"
+raw-qwen-eval = "oreo_qwen.raw_eval.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]

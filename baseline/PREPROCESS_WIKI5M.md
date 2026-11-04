@@ -1,11 +1,13 @@
 # Wikidata5M Passage Preprocessing Plan
 
-## Status and Review Gate
+## Status
 
 This document specifies how one indexed Wikidata5M passage becomes one
-structured Stage-1 reconstruction example. It is a review document, not an
-implementation. No preprocessing code or generated corpus should be created
-until this contract is approved.
+structured Stage-1 reconstruction example. The reviewed design is implemented
+under `oreo_qwen/wikidata5m/preprocessing/`, including the single-passage
+pipeline, rendering, validation, deterministic resumable shards, CLI, and
+fixture tests. No full-corpus preprocessing run was performed as part of the
+implementation change.
 
 The datastore described in `oreo_qwen/wikidata5m/README.md` is the only source
 for passage, alias, ID-mapping, and graph queries. Preprocessing must not scan
@@ -503,7 +505,7 @@ Aliases are never substituted into the training suffix. If two occurrences of
 one QID use different aliases, each sentinel reconstructs its own original
 surface.
 
-The future instruct rendering is:
+The downstream instruct rendering is:
 
 ```text
 SYSTEM
@@ -726,7 +728,7 @@ No alias list is sent to the model or duplicated into every JSONL record.
 
 ## Output Dataset Layout
 
-The future implementation writes only under:
+The implementation writes only under:
 
 ```text
 datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1/
@@ -795,10 +797,9 @@ no_context_candidate
 For auditability, the manifest may contain at most 100 example QIDs per rejection
 or diagnostic category; it must not write an unbounded rejection log by default.
 
-## Planned Code Boundaries
+## Code Boundaries
 
-The later implementation should add a preprocessing subpackage without changing
-the read-only datastore API:
+The preprocessing subpackage does not change the read-only datastore API:
 
 ```text
 oreo_qwen/wikidata5m/preprocessing/
@@ -819,7 +820,7 @@ render_example(record, passage_text) -> RenderedExample
 validate_preprocessed_record(record, passage_text, store) -> None
 ```
 
-Planned CLI:
+CLI:
 
 ```text
 wikidata5m-preprocess build SOURCE_ROOT [--output ...] [--start-id ...] [--stop-id ...]
@@ -896,10 +897,9 @@ artifacts. It is the required review tool before a full build.
   range and writes only to a temporary directory.
 - No default test builds or modifies the full preprocessed corpus.
 
-## Future `INPUT_CONTRACT.md` Revisions
+## Corresponding `INPUT_CONTRACT.md` Revisions
 
-After this preprocessing contract is approved, the tensor-level input document
-must be revised separately to:
+The tensor-level input document has been revised to:
 
 - show `entity surface <|s_ent|> <|rel|> <|t_ent|>` marker order;
 - state that every visible resolved occurrence is marked;

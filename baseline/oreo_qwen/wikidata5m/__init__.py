@@ -12,6 +12,16 @@ from .errors import (
     Wikidata5MError,
 )
 from .store import Wikidata5MStore, validate_index
+from .preprocessing import (
+    PreprocessConfig,
+    PreprocessedRecord,
+    PreprocessResult,
+    build_preprocessed_corpus,
+    preprocess_passage,
+    render_example,
+    validate_preprocessed_corpus,
+    validate_preprocessed_record,
+)
 from .types import (
     DenseEdgeBatch,
     Edge,
@@ -39,6 +49,14 @@ __all__ = [
     "UnknownRelationError",
     "Wikidata5MError",
     "Wikidata5MStore",
+    "PreprocessConfig",
+    "PreprocessedRecord",
+    "PreprocessResult",
     "build_index",
+    "build_preprocessed_corpus",
+    "preprocess_passage",
+    "render_example",
     "validate_index",
+    "validate_preprocessed_corpus",
+    "validate_preprocessed_record",
 ]
