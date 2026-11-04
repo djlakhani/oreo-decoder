@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copy this file to aws_env.sh and set HF_HUB_CACHE to the existing Qwen cache.
 
-export KGREALM_REPO="/home/ubuntu/KGReaLM"
+export OREO_DECODER_REPO="/home/ubuntu/oreo-decoder"
 export KGREALM_SCRATCH="/opt/dlami/nvme/kgrealm"
 export KGREALM_S3_URI="s3://kgrealm-oreo-data-589498925064-us-east-1-an/kgrealm-oreo-data"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-/REPLACE/WITH/EXISTING/HUGGINGFACE/HUB/CACHE}"

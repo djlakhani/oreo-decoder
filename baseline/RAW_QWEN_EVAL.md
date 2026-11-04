@@ -125,11 +125,11 @@ cd oreo-decoder/baseline
 On EC2, clone or update the repository, then create the local environment file:
 
 ```bash
-cd /home/ubuntu/KGReaLM/oreo-decoder/baseline/scripts/aws
+cd /home/ubuntu/oreo-decoder/baseline/scripts/aws
 cp aws_env.example.sh aws_env.sh
 ```
 
-Edit `aws_env.sh` so `KGREALM_REPO` is the actual clone path and
+Edit `aws_env.sh` so `OREO_DECODER_REPO` is the actual clone path and
 `HF_HUB_CACHE` is the already populated Hugging Face hub cache. Do not commit
 this machine-specific file. Then run:
 
