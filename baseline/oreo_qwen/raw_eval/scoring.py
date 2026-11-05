@@ -82,14 +82,29 @@ def _target_score(target: Any, prediction: str | None, *, parse_valid: bool) -> 
         parse_valid and normalized_prediction == target.normalized_exact_text
     )
     alias_aware: bool | None
+    alias_substring_aware: bool | None
     if target.gold_qid is None:
         alias_aware = None
+        alias_substring_aware = None
     else:
+        accepted_aliases = set(target.accepted_normalized_aliases)
         alias_aware = bool(
             parse_valid
             and (
                 exact
-                or normalized_prediction in set(target.accepted_normalized_aliases)
+                or normalized_prediction in accepted_aliases
+            )
+        )
+        alias_substring_aware = bool(
+            parse_valid
+            and (
+                exact
+                or (
+                    bool(normalized_prediction)
+                    and any(
+                        normalized_prediction in alias for alias in accepted_aliases
+                    )
+                )
             )
         )
     return {
@@ -105,6 +120,7 @@ def _target_score(target: Any, prediction: str | None, *, parse_valid: bool) -> 
         "exact": exact,
         "normalized": normalized,
         "alias_aware": alias_aware,
+        "alias_substring_aware": alias_substring_aware,
     }
 
 
@@ -147,6 +163,13 @@ def score_targets(targets: Sequence[Any], generation: str) -> dict[str, Any]:
             for item in strict_targets
             if item["alias_aware"] is None
         ),
+        "complete_alias_substring_aware": strict.valid
+        and all(item["alias_substring_aware"] for item in kg_strict)
+        and all(
+            item["normalized"]
+            for item in strict_targets
+            if item["alias_substring_aware"] is None
+        ),
     }
 
 
@@ -183,6 +206,10 @@ def aggregate_prediction_records(records: Sequence[Mapping[str, Any]]) -> dict[s
         if status != "generated":
             continue
         score = record["score"]
+        if "complete_alias_substring_aware" not in score:
+            score = rescore_prediction_record(record)
+            if score is None:
+                continue
         response_counts["strict_format_valid"] += bool(score["strict_parse"]["valid"])
         response_counts["recovery_format_valid"] += bool(
             score["recovery_parse"]["valid"]
@@ -191,6 +218,9 @@ def aggregate_prediction_records(records: Sequence[Mapping[str, Any]]) -> dict[s
         response_counts["complete_normalized"] += bool(score["complete_normalized"])
         response_counts["complete_alias_aware"] += bool(
             score["complete_alias_aware"]
+        )
+        response_counts["complete_alias_substring_aware"] += bool(
+            score["complete_alias_substring_aware"]
         )
         if record.get("input_tokens") is not None:
             input_lengths.append(int(record["input_tokens"]))
@@ -205,6 +235,9 @@ def aggregate_prediction_records(records: Sequence[Mapping[str, Any]]) -> dict[s
             if target["alias_aware"] is not None:
                 counters["alias_targets"] += 1
                 counters["alias_aware"] += bool(target["alias_aware"])
+                counters["alias_substring_aware"] += bool(
+                    target["alias_substring_aware"]
+                )
 
     def rate(numerator: int, denominator: int) -> float | None:
         return None if denominator == 0 else numerator / denominator
@@ -237,6 +270,12 @@ def aggregate_prediction_records(records: Sequence[Mapping[str, Any]]) -> dict[s
         "complete_alias_aware_rate": rate(
             response_counts["complete_alias_aware"], examples
         ),
+        "complete_alias_substring_aware": response_counts[
+            "complete_alias_substring_aware"
+        ],
+        "complete_alias_substring_aware_rate": rate(
+            response_counts["complete_alias_substring_aware"], examples
+        ),
     }
     by_kind: dict[str, Any] = {}
     for kind, counts in sorted(target_counts.items()):
@@ -246,6 +285,9 @@ def aggregate_prediction_records(records: Sequence[Mapping[str, Any]]) -> dict[s
             "exact_rate": rate(counts["exact"], counts["targets"]),
             "normalized_rate": rate(counts["normalized"], counts["targets"]),
             "alias_aware_rate": rate(counts["alias_aware"], counts["alias_targets"]),
+            "alias_substring_aware_rate": rate(
+                counts["alias_substring_aware"], counts["alias_targets"]
+            ),
         }
     return {
         "response": response_metrics,

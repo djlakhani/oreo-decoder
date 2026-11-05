@@ -14,6 +14,13 @@ from .artifacts import iter_eval_examples, validate_eval_dataset
 from .inference import run_inference
 from .prepare import prepare_random_sample
 from .report import rescore_run
+from .review import (
+    _artifact_directory,
+    _find_eval_root,
+    _validate_input_pair,
+    generate_review,
+    resolve_metrics_path,
+)
 from .schema import RawEvalError
 
 
@@ -92,6 +99,17 @@ def _inspect(args: argparse.Namespace) -> None:
                 return
 
 
+def _review(args: argparse.Namespace) -> None:
+    metrics_path, discovered_root = resolve_metrics_path(
+        args.source, eval_root=args.eval_root
+    )
+    if args.input_name is not None:
+        root = discovered_root or _find_eval_root(args.eval_root)
+        inputs = _artifact_directory(root, "inputs")
+        _validate_input_pair(metrics_path, inputs / args.input_name)
+    print(generate_review(metrics_path, args.output, limit=args.limit))
+
+
 def _add_preprocess_arguments(parser: argparse.ArgumentParser) -> None:
     defaults = PreprocessConfig()
     parser.add_argument("--max-incoming-degree", type=int, default=defaults.max_incoming_degree)
@@ -143,12 +161,33 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--count", type=int, default=1)
     inspect.add_argument("--show-gold", action="store_true")
     inspect.set_defaults(handler=_inspect)
+
+    review = subparsers.add_parser(
+        "review", help="create a readable HTML report for a completed run"
+    )
+    review.add_argument(
+        "source",
+        help="rescored metrics path, run directory, or folder name under eval-runs",
+    )
+    review.add_argument(
+        "--eval-root",
+        help="directory containing eval-runs/ and eval-inputs/ (auto-detects aws-eval)",
+    )
+    review.add_argument(
+        "--input-name",
+        help="folder name under eval-inputs; verifies that it matches the run",
+    )
+    review.add_argument("--output", help="HTML output path")
+    review.add_argument("--limit", type=int, help="show only the first N passages")
+    review.set_defaults(handler=_review)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "limit", None) is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
     try:
         args.handler(args)
     except (RawEvalError, Wikidata5MError, OSError, ValueError, KeyError) as error:

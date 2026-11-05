@@ -35,10 +35,12 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run raw-qwen-eval run \
   --max-new-tokens 512
 
 uv run raw-qwen-eval score "${RUN_DIR}"
+uv run raw-qwen-eval review "${RUN_DIR}/rescored_metrics.json"
 
 sync_directory_to_s3 \
   "${RUN_DIR}" \
   "${KGREALM_S3_URI}/eval-runs/${RUN_NAME}"
 
 echo "Smoke metrics: ${RUN_DIR}/rescored_metrics.json"
+echo "Smoke review: ${RUN_DIR}/review.html"
 

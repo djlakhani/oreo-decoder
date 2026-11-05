@@ -10,7 +10,7 @@ from .inference import iter_prediction_records
 from .schema import EvalArtifactError
 from .scoring import aggregate_prediction_records, rescore_prediction_record
 
-SCORER_VERSION = "raw_qwen_reconstruction_scorer_v1"
+SCORER_VERSION = "raw_qwen_reconstruction_scorer_v2"
 
 
 def rescore_run(run_dir: str | Path, output_path: str | Path | None = None) -> dict[str, Any]:

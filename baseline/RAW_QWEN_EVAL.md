@@ -45,8 +45,10 @@ prompt. Consequently, a saved response can always be rescored later against the
 correct entity and aliases without reopening the datastore.
 
 The scorer reports strict-format validity, recoverable-format validity, exact
-surface accuracy, normalized accuracy, and alias-aware accuracy. Alias-aware
-matching is deterministic string matching; no LLM judge is required. Both
+surface accuracy, normalized accuracy, alias-aware accuracy, and a lenient
+alias-substring accuracy. The latter accepts a non-empty normalized prediction
+when it occurs inside an accepted alias (for example, `gator` in `aligator`).
+These are deterministic string metrics; no LLM judge is required. Both
 per-target and complete-response metrics are retained, grouped by mask kind.
 
 ## Artifacts
@@ -166,7 +168,31 @@ uv run raw-qwen-eval validate /path/to/eval-input
 uv run raw-qwen-eval inspect /path/to/eval-input --count 2
 uv run raw-qwen-eval inspect /path/to/eval-input --count 1 --show-gold
 uv run raw-qwen-eval score /path/to/eval-run
+uv run raw-qwen-eval review /path/to/eval-run/rescored_metrics.json
 ```
 
 Without `--show-gold`, inspection deliberately hides exact answers, QIDs, and
 aliases. Generated artifacts and `scripts/aws/aws_env.sh` must remain untracked.
+
+The `review` command writes `review.html` beside the metrics file. It shows the
+aggregate exact, normalized, alias-aware, alias-substring, and format rates
+first, followed by each passage, its QID, accepted answers, model response, and
+blank-level result.
+It requires the sibling run `manifest.json` and `predictions/*.jsonl.gz`; the
+aggregate metrics file alone does not contain passages or generations. Use
+`--limit N` to keep a large-run report manageable.
+
+For a local download arranged under `KGReaLM/aws-eval/`, run the command
+anywhere below `KGReaLM` using folder names only. Both `eval-runs` /
+`eval-inputs` and `eval_runs` / `eval_inputs` directory spellings are accepted:
+
+```bash
+uv run raw-qwen-eval review qwen3-0.6b-native-smoke32-v1 \
+  --input-name raw-qwen-native-smoke32-v1
+```
+
+The command auto-discovers the nearest ancestor's `aws-eval` directory. The
+input name is optional because prediction records already contain their passage
+and gold sidecar; when supplied, its manifest checksum is verified against the
+run. Use `--eval-root /another/path/aws-eval` when auto-discovery is not
+appropriate.
