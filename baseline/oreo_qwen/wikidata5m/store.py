@@ -107,11 +107,13 @@ def _validate_sources(
         stat = path.stat()
         if stat.st_size != expected.get("size"):
             raise StaleIndexError(f"indexed source file size changed: {path}")
-        if full:
+        # Object stores and file-copy tools do not necessarily preserve source
+        # mtimes. A timestamp mismatch is therefore a reason to verify content,
+        # not proof that the index is stale. Matching mtimes retain the fast
+        # path; full validation always hashes every source.
+        if full or stat.st_mtime_ns != expected.get("mtime_ns"):
             if _sha256(path) != expected.get("sha256"):
                 raise StaleIndexError(f"indexed source file content changed: {path}")
-        elif stat.st_mtime_ns != expected.get("mtime_ns"):
-            raise StaleIndexError(f"indexed source file modification time changed: {path}")
 
 
 def _safe_artifact_path(index_dir: Path, relative: object) -> Path:
@@ -238,9 +240,10 @@ def validate_index(
 ) -> dict[str, object]:
     """Validate an index and return its manifest.
 
-    Quick validation checks source stat metadata, SQLite consistency, and array
-    schemas. Full validation additionally hashes every source and artifact and
-    scans graph-array values.
+    Quick validation checks source stat metadata, falling back to a source hash
+    when an mtime differs, plus SQLite consistency and array schemas. Full
+    validation always hashes every source and artifact and scans graph-array
+    values.
     """
 
     index = Path(index_dir).expanduser().resolve()

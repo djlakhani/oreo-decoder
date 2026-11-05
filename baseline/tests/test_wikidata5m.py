@@ -264,12 +264,25 @@ def test_existing_index_requires_force(built_index: tuple[Path, Path]) -> None:
     validate_index(index)
 
 
-def test_stale_source_is_rejected(built_index: tuple[Path, Path]) -> None:
+def test_source_mtime_change_falls_back_to_checksum(
+    built_index: tuple[Path, Path],
+) -> None:
     source, index = built_index
     passage_path = source / "wikidata5m_text.txt"
     stat = passage_path.stat()
     os.utime(passage_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
-    with pytest.raises(StaleIndexError, match="modification time"):
+    with Wikidata5MStore(index) as store:
+        assert store.passage("Q2") is not None
+
+
+def test_quick_validation_rejects_changed_content_when_mtime_differs(
+    built_index: tuple[Path, Path],
+) -> None:
+    source, index = built_index
+    passage_path = source / "wikidata5m_text.txt"
+    changed = passage_path.read_bytes().replace(b"Two has", b"Two haz", 1)
+    passage_path.write_bytes(changed)
+    with pytest.raises(StaleIndexError, match="content changed"):
         Wikidata5MStore(index)
 
 
