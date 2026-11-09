@@ -124,3 +124,8 @@ eval-inputs/raw-qwen-native-main5000-v1/
 The scripts use offline inference after setup, preventing an evaluation from
 silently switching model snapshots. Completed artifacts are synchronized to the
 same S3 bucket at the end of each run.
+
+During inference, a terminal progress bar updates after approximately every ten
+examples. This is display-only and does not add checkpoint I/O. Recovery remains shard-based:
+completed prediction shards and `partial_metrics.json` survive an interruption,
+while the currently running shard is recomputed after restart.

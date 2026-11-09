@@ -7,10 +7,11 @@ import json
 import os
 import platform
 import random
+import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import torch
 import transformers
@@ -124,6 +125,7 @@ def _generate_shard(
     batch_size: int,
     max_input_tokens: int,
     max_new_tokens: int,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
     prepared: list[tuple[EvalExample, str, list[int]]] = []
     predictions: dict[str, dict[str, Any]] = {}
@@ -148,6 +150,10 @@ def _generate_shard(
             }
         else:
             prepared.append((example, prompt, input_ids))
+
+    skipped = len(examples) - len(prepared)
+    if skipped and progress_callback is not None:
+        progress_callback(skipped)
 
     for start in range(0, len(prepared), batch_size):
         batch = prepared[start : start + batch_size]
@@ -195,7 +201,23 @@ def _generate_shard(
                 "generated_text": text,
                 "score": score,
             }
+        if progress_callback is not None:
+            progress_callback(len(batch))
     return [predictions[example.example_id] for example in examples]
+
+
+def _print_progress(completed: int, total: int) -> None:
+    width = 30
+    ratio = 1.0 if total == 0 else min(1.0, completed / total)
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    ending = "\n" if completed >= total else "\r"
+    print(
+        f"Qwen inference [{bar}] {completed:,}/{total:,} ({ratio:.1%})",
+        end=ending,
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def run_inference(
@@ -242,6 +264,7 @@ def run_inference(
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    print(f"Loading model and tokenizer: {model_name}", file=sys.stderr, flush=True)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         revision=revision,
@@ -266,6 +289,18 @@ def run_inference(
         for entry in ([] if existing is None else existing.get("shards", []))
     }
     shard_entries: list[dict[str, Any]] = []
+    total_records = int(input_manifest["records"])
+    completed_records = 0
+    last_reported = 0
+
+    def advance_progress(count: int) -> None:
+        nonlocal completed_records, last_reported
+        completed_records += count
+        if completed_records >= total_records or completed_records - last_reported >= 10:
+            _print_progress(completed_records, total_records)
+            last_reported = completed_records
+
+    _print_progress(0, total_records)
     for input_entry in input_manifest["shards"]:
         input_relative = str(input_entry["path"])
         input_path = inputs / input_relative
@@ -278,6 +313,7 @@ def run_inference(
             and file_sha256(destination) == old.get("sha256")
         ):
             shard_entries.append(old)
+            advance_progress(int(old["records"]))
             continue
         examples = list(iter_eval_examples(input_path))
         records = _generate_shard(
@@ -288,6 +324,7 @@ def run_inference(
             batch_size=batch_size,
             max_input_tokens=max_input_tokens,
             max_new_tokens=max_new_tokens,
+            progress_callback=advance_progress,
         )
         info = _write_prediction_shard(destination, records)
         entry = {
