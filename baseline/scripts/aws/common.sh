@@ -10,15 +10,13 @@ fi
 : "${OREO_DECODER_REPO:?Set OREO_DECODER_REPO or create scripts/aws/aws_env.sh}"
 : "${KGREALM_SCRATCH:?Set KGREALM_SCRATCH}"
 : "${KGREALM_S3_URI:?Set KGREALM_S3_URI}"
-: "${HF_HUB_CACHE:?Set HF_HUB_CACHE to the existing Qwen cache}"
-if [[ "${HF_HUB_CACHE}" == "/REPLACE/WITH/EXISTING/HUGGINGFACE/HUB/CACHE" ]]; then
-  echo "Set HF_HUB_CACHE in the environment or scripts/aws/aws_env.sh" >&2
-  exit 2
-fi
 
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-${KGREALM_SCRATCH}/venv}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${KGREALM_SCRATCH}/cache/uv}"
 export TMPDIR="${TMPDIR:-${KGREALM_SCRATCH}/tmp}"
+export HF_HOME="${HF_HOME:-${KGREALM_SCRATCH}/cache/huggingface}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_XET_CACHE="${HF_XET_CACHE:-${HF_HOME}/xet}"
 export WIKIDATA5M_ROOT="${WIKIDATA5M_ROOT:-${KGREALM_SCRATCH}/datasets/Wikidata5M}"
 export RAW_EVAL_INPUT_ROOT="${RAW_EVAL_INPUT_ROOT:-${KGREALM_SCRATCH}/eval-inputs}"
 export RAW_EVAL_RUN_ROOT="${RAW_EVAL_RUN_ROOT:-${KGREALM_SCRATCH}/eval-runs}"
@@ -44,6 +42,8 @@ require_workspace() {
     "${RAW_EVAL_INPUT_ROOT}" \
     "${RAW_EVAL_RUN_ROOT}" \
     "${KGREALM_SCRATCH}/tools" \
+    "${HF_HUB_CACHE}" \
+    "${HF_XET_CACHE}" \
     "${TMPDIR}" \
     "${UV_CACHE_DIR}"
 }

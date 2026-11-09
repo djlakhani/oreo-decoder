@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
+QWEN_MODEL_NAME="${QWEN_MODEL_NAME:-Qwen/Qwen3-0.6B}"
+QWEN_DOWNLOAD_MODEL="${QWEN_DOWNLOAD_MODEL:-0}"
+export QWEN_MODEL_NAME
+
 require_command aws
 require_command nvidia-smi
 require_command findmnt
@@ -46,13 +50,30 @@ if torch.cuda.is_available():
     print("gpu", torch.cuda.get_device_name(0))
 PY
 
+if [[ "${QWEN_DOWNLOAD_MODEL}" == "1" ]]; then
+  echo "Downloading ${QWEN_MODEL_NAME} into ${HF_HUB_CACHE}:"
+  uv run python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+
+name = os.environ["QWEN_MODEL_NAME"]
+snapshot = snapshot_download(repo_id=name, cache_dir=os.environ["HF_HUB_CACHE"])
+print("model_snapshot", snapshot)
+PY
+fi
+
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run python - <<'PY'
+import os
 from transformers import AutoConfig, AutoTokenizer
 
-name = "Qwen/Qwen3-0.6B"
+name = os.environ["QWEN_MODEL_NAME"]
 config = AutoConfig.from_pretrained(name, local_files_only=True)
 tokenizer = AutoTokenizer.from_pretrained(name, local_files_only=True)
+print("cached_model", name)
 print("cached_model_type", config.model_type)
 print("cached_tokenizer_size", len(tokenizer))
 PY
+
+echo "Hugging Face cache usage:"
+du -sh "${HF_HOME}"
 
