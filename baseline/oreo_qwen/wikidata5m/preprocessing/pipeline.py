@@ -344,7 +344,7 @@ def preprocess_passage(
     occurrences = tuple(
         MaskedOccurrence(
             sentinel_index=index,
-            sentinel_token=f"<|kg_mask_{index}|>",
+            sentinel_token=f"[BLANK_{index}]",
             start_char=item[0],
             end_char=item[1],
             exact_text=item[2],

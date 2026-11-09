@@ -69,7 +69,7 @@ The first implementation uses the following versioned defaults:
 
 | Setting | Value |
 |---|---:|
-| Preprocessing schema | `wiki5m_reconstruction_v1` |
+| Preprocessing schema | `wiki5m_reconstruction_v2` |
 | Graph split | `train` only |
 | Maximum incoming degree considered | `1,000` |
 | Maximum aliases considered per QID | `64` |
@@ -199,7 +199,7 @@ belonging to:
 - entities in the primary incoming star; and
 - entities in a nested star being evaluated.
 
-There is no global reverse-alias lookup in v1.
+There is no global reverse-alias lookup in v2.
 
 ### Alias preparation
 
@@ -365,7 +365,7 @@ A primary-star entity `C` is eligible as an auxiliary target when:
 Eligible auxiliary QIDs are ordered by the SHA-256 digest of:
 
 ```text
-wiki5m_reconstruction_v1\0<PASSAGE_QID>\0<CANDIDATE_QID>
+wiki5m_reconstruction_v2\0<PASSAGE_QID>\0<CANDIDATE_QID>
 ```
 
 Digests are compared lexicographically, with numeric QID as a final tie-break.
@@ -417,15 +417,16 @@ character spans. Enumerate contiguous one- through four-token n-grams that:
 Rank normalized candidate forms using SHA-256 of:
 
 ```text
-wiki5m_reconstruction_v1\0<PASSAGE_QID>\0context\0<NORMALIZED_FORM>
+wiki5m_reconstruction_v2\0<PASSAGE_QID>\0context\0<NORMALIZED_FORM>
 ```
 
 For each ranked form, rank its occurrences with the same digest plus the
 occurrence start offset. Select one occurrence to mask only when at least one
 other occurrence remains visible. Do not choose overlapping context blanks.
 
-Select at most two context blanks and never exceed the remaining 16-sentinel
-budget. It is valid to select zero when no candidate passes the rules.
+Select at most two context blanks and never exceed the remaining configured
+sentinel budget, which defaults to 16. It is valid to select zero when no
+candidate passes the rules.
 
 Context-only selections are not added to the local graph and carry no gold QID.
 
@@ -440,7 +441,9 @@ Combine all KG-target occurrences and selected context-only spans. Sort by:
 ```
 
 KG masks precede context-only masks only as an impossible-overlap tie-break.
-Assign `<|kg_mask_0|>` through `<|kg_mask_15|>` in this passage order.
+Assign textual identifiers `[BLANK_0]`, `[BLANK_1]`, and so on in this passage
+order. These identifiers use Qwen's ordinary vocabulary and are not registered
+as special tokens.
 
 Each masked occurrence records its exact original surface:
 
@@ -492,12 +495,12 @@ corrupted passage deterministically for inspection and later tokenization.
 
 ## Stage 8 — Exact Reconstruction Target
 
-Sentinel answers are ordered by sentinel index and always use the exact removed
+Blank answers are ordered by sentinel index and always use the exact removed
 surface:
 
 ```text
-<|kg_mask_0|> exact span 0
-<|kg_mask_1|> exact span 1
+[BLANK_0] exact span 0
+[BLANK_1] exact span 1
 ...
 ```
 
@@ -509,33 +512,35 @@ The downstream instruct rendering is:
 
 ```text
 SYSTEM
-Reconstruct each masked span. Return only each sentinel followed by its
-original text, in sentinel order.
+Reconstruct each numbered blank. Return only each blank identifier followed by
+its original text, in numerical order.
 
 USER
 <marked and corrupted passage>
 
 ASSISTANT
-<|kg_reconstruct|> <|kg_mask_0|> exact span 0
-<|kg_mask_1|> exact span 1 ... EOS
+[BLANK_0] exact span 0
+[BLANK_1] exact span 1 ... EOS
 ```
 
 After Qwen chat-template tokenization:
 
-- all labels through and including `<|kg_reconstruct|>` are `-100`;
-- every suffix sentinel, exact span token, and EOS token is supervised; and
-- the reconstruction suffix must begin with `<|kg_mask_0|>`.
+- all system, user, and assistant-header labels are `-100`;
+- every assistant-content blank identifier, exact span token, and EOS token is
+  supervised; and
+- the collator records the first assistant-content token position for contract
+  validation.
 
 The chat template and token positions are not materialized in this phase.
 
 ## Untokenized JSONL Record
 
 Each accepted line has this logical schema. Field names and types are public
-within preprocessing schema v1.
+within preprocessing schema v2.
 
 ```json
 {
-  "schema_version": "wiki5m_reconstruction_v1",
+  "schema_version": "wiki5m_reconstruction_v2",
   "example_id": "wiki5m:Q900",
   "passage": {
     "qid": "Q900",
@@ -573,7 +578,7 @@ within preprocessing schema v1.
 
 Additional schema rules:
 
-- `example_id` is uniquely derived from the passage QID because v1 creates one
+- `example_id` is uniquely derived from the passage QID because v2 creates one
   example per passage.
 - `text_sha256` hashes the exact UTF-8 passage payload and detects stale
   character offsets.
@@ -659,20 +664,20 @@ occurrence is masked while the earlier occurrence remains visible.
 
 | Sentinel | Exact answer | Kind | Gold QID |
 |---|---|---|---|
-| `<|kg_mask_0|>` | `Aurora Institute` | `primary_kg` | `Q900` |
-| `<|kg_mask_1|>` | `Mira Chen` | `auxiliary_kg` | `Q101` |
-| `<|kg_mask_2|>` | `Aurora Institute` | `primary_kg` | `Q900` |
-| `<|kg_mask_3|>` | `Aurora Institute` | `primary_kg` | `Q900` |
-| `<|kg_mask_4|>` | `lecture` | `context_only` | `null` |
+| `[BLANK_0]` | `Aurora Institute` | `primary_kg` | `Q900` |
+| `[BLANK_1]` | `Mira Chen` | `auxiliary_kg` | `Q101` |
+| `[BLANK_2]` | `Aurora Institute` | `primary_kg` | `Q900` |
+| `[BLANK_3]` | `Aurora Institute` | `primary_kg` | `Q900` |
+| `[BLANK_4]` | `lecture` | `context_only` | `null` |
 
 ### Marked and corrupted passage
 
 ```text
-<|kg_mask_0|> was founded in 1998. <|kg_mask_1|> joined <|kg_mask_2|> after
+[BLANK_0] was founded in 1998. [BLANK_1] joined [BLANK_2] after
 working with Ilan Rao <|s_ent|> <|rel|> <|t_ent|>. Northbridge University
 <|s_ent|> <|rel|> <|t_ent|> and Solace Foundation <|s_ent|> <|rel|> <|t_ent|>
-later funded <|kg_mask_3|>. Its annual lecture became the city's best-known
-<|kg_mask_4|>.
+later funded [BLANK_3]. Its annual lecture became the city's best-known
+[BLANK_4].
 ```
 
 There are no marker tokens around the entity blanks. Every remaining resolved
@@ -681,11 +686,11 @@ entity occurrence is followed by the complete marker block.
 ### Reconstruction suffix
 
 ```text
-<|kg_mask_0|> Aurora Institute
-<|kg_mask_1|> Mira Chen
-<|kg_mask_2|> Aurora Institute
-<|kg_mask_3|> Aurora Institute
-<|kg_mask_4|> lecture
+[BLANK_0] Aurora Institute
+[BLANK_1] Mira Chen
+[BLANK_2] Aurora Institute
+[BLANK_3] Aurora Institute
+[BLANK_4] lecture
 EOS
 ```
 
@@ -731,7 +736,7 @@ No alias list is sent to the model or duplicated into every JSONL record.
 The implementation writes only under:
 
 ```text
-datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1/
+datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2/
 ├── manifest.json
 └── shards/
     ├── entities-00000000-00009999.jsonl.gz
@@ -904,8 +909,8 @@ The tensor-level input document has been revised to:
 - show `entity surface <|s_ent|> <|rel|> <|t_ent|>` marker order;
 - state that every visible resolved occurrence is marked;
 - state that masked occurrences have no surrounding KG markers;
-- use the instruct chat serialization with `<|kg_reconstruct|>` at the start of
-  the assistant response;
+- use ordinary `[BLANK_i]` text and the instruct chat template, with no
+  reconstruction delimiter token;
 - preserve exact-surface, suffix-only causal labels;
 - describe Stage-1 evaluation metadata outside `model.forward`;
 - remove the assumption that hyperlink annotations already exist; and

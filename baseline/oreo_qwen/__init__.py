@@ -9,6 +9,11 @@ from .modeling import (
     OreoQwen3Model,
     register_oreo_tokens_and_resize,
 )
+from .interaction import (
+    CausalTentBroadcastLayer,
+    GroupedQueryCrossAttention,
+    MarkerContextualizationLayer,
+)
 from .reasoner import (
     EntityLinker,
     EntityMemory,
@@ -24,9 +29,6 @@ from .reasoner import (
     ValueProjection,
 )
 from .tokens import (
-    KG_ANSWER_TOKEN,
-    KG_MASK_TOKENS,
-    KG_RECONSTRUCT_TOKEN,
     OREO_SPECIAL_TOKENS,
     REL_TOKEN,
     SOURCE_ENTITY_TOKEN,
@@ -57,10 +59,10 @@ __all__ = [
     "OreoCausalLMOutputWithPast",
     "OreoQwen3ForCausalLM",
     "OreoQwen3Model",
+    "CausalTentBroadcastLayer",
+    "GroupedQueryCrossAttention",
+    "MarkerContextualizationLayer",
     "register_oreo_tokens_and_resize",
-    "KG_ANSWER_TOKEN",
-    "KG_MASK_TOKENS",
-    "KG_RECONSTRUCT_TOKEN",
     "OREO_SPECIAL_TOKENS",
     "REL_TOKEN",
     "SOURCE_ENTITY_TOKEN",

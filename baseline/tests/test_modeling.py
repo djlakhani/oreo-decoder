@@ -174,6 +174,18 @@ class OreoQwen3ModelTests(unittest.TestCase):
                 lambda _module, _inputs, _output: events.append("kil")
             )
         )
+        for layer in self.model.model.pre_kil_layers:
+            hooks.append(
+                layer.register_forward_hook(
+                    lambda _module, _inputs, _output: events.append("pre-kil")
+                )
+            )
+        for layer in self.model.model.post_kil_layers:
+            hooks.append(
+                layer.register_forward_hook(
+                    lambda _module, _inputs, _output: events.append("post-kil")
+                )
+            )
         try:
             self.model(
                 input_ids=self.input_ids,
@@ -187,7 +199,18 @@ class OreoQwen3ModelTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["layer-1", "kil", "layer-2", "layer-3", "kil", "layer-4"],
+            [
+                "layer-1",
+                "pre-kil",
+                "kil",
+                "post-kil",
+                "layer-2",
+                "layer-3",
+                "pre-kil",
+                "kil",
+                "post-kil",
+                "layer-4",
+            ],
         )
 
     def test_forward_exposes_losses_and_diagnostics(self) -> None:
@@ -273,6 +296,16 @@ class OreoQwen3ModelTests(unittest.TestCase):
                 0.0,
             )
 
+        # The new attention branches are zero-gated for checkpoint stability.
+        # Their gates must still receive a first-step gradient so the branches
+        # can open and their projections can train on subsequent steps.
+        for layer in (
+            *self.model.model.pre_kil_layers,
+            *self.model.model.post_kil_layers,
+        ):
+            self.assertIsNotNone(layer.gate.grad)
+            self.assertGreater(layer.gate.grad.abs().item(), 0.0)
+
         # Token 10 occupies a source-marker position and participates in the
         # supervised entity-linking path.
         self.assertGreater(
@@ -305,8 +338,13 @@ class OreoQwen3ModelTests(unittest.TestCase):
         oreo = OreoQwen3ForCausalLM(oreo_config).eval()
         incompatible = oreo.load_state_dict(native.state_dict(), strict=False)
         self.assertFalse(incompatible.unexpected_keys)
+        new_module_prefixes = (
+            "model.reasoner.",
+            "model.pre_kil_layers.",
+            "model.post_kil_layers.",
+        )
         self.assertTrue(
-            all(key.startswith("model.reasoner.") for key in incompatible.missing_keys)
+            all(key.startswith(new_module_prefixes) for key in incompatible.missing_keys)
         )
 
         with torch.no_grad():
@@ -449,13 +487,13 @@ class OreoQwen3ModelTests(unittest.TestCase):
                 2,
                 token_ids.relation,
                 token_ids.target_entity,
-                token_ids.reconstruct,
-                token_ids.masks[0],
+                4,
+                5,
                 3,
             ]]
         )
         labels = input_ids.clone()
-        labels[:, :5] = -100
+        labels[:, :4] = -100
         kg = KGInputBatch(
             kg_mention_batch=torch.tensor([0]),
             kg_src_positions=torch.tensor([0]),

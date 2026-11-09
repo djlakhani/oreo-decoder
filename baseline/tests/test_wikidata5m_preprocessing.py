@@ -103,7 +103,7 @@ def test_single_passage_record_and_rendering(preprocessing_store) -> None:
     assert "Mira Chen <|s_ent|> <|rel|> <|t_ent|>" in rendered.corrupted_passage or (
         "Northbridge University <|s_ent|> <|rel|> <|t_ent|>" in rendered.corrupted_passage
     )
-    assert "<|kg_mask_" in rendered.corrupted_passage
+    assert "[BLANK_" in rendered.corrupted_passage
     assert any(item.kind == "context_only" for item in record.masked_occurrences)
     for item in record.masked_occurrences:
         if item.kind == "context_only":

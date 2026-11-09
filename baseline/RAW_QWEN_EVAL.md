@@ -3,7 +3,7 @@
 For the corresponding fresh-instance Qwen3-4B workflow, see
 [`QWEN3_4B_EVAL.md`](QWEN3_4B_EVAL.md).
 
-This evaluation measures how well unmodified `Qwen/Qwen3-0.6B` reconstructs
+This evaluation measures how well unmodified `Qwen/Qwen3-4B` reconstructs
 the Wikidata5M blanks before Oreo/KG components are introduced. Qwen sees only
 the corrupted passage and textual blank identifiers such as `[BLANK_0]`. It
 never sees QIDs, aliases, graph edges, dense IDs, or Oreo special tokens.

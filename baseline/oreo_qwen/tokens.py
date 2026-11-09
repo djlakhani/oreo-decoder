@@ -9,17 +9,11 @@ from typing import Any
 SOURCE_ENTITY_TOKEN = "<|s_ent|>"
 REL_TOKEN = "<|rel|>"
 TARGET_ENTITY_TOKEN = "<|t_ent|>"
-KG_RECONSTRUCT_TOKEN = "<|kg_reconstruct|>"
-KG_ANSWER_TOKEN = "<|kg_answer|>"
-KG_MASK_TOKENS = tuple(f"<|kg_mask_{index}|>" for index in range(16))
 
 OREO_SPECIAL_TOKENS = (
     SOURCE_ENTITY_TOKEN,
     REL_TOKEN,
     TARGET_ENTITY_TOKEN,
-    KG_RECONSTRUCT_TOKEN,
-    KG_ANSWER_TOKEN,
-    *KG_MASK_TOKENS,
 )
 
 
@@ -30,16 +24,8 @@ class OreoSpecialTokenIds:
     source_entity: int
     relation: int
     target_entity: int
-    reconstruct: int
-    answer: int
-    masks: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        if len(self.masks) != len(KG_MASK_TOKENS):
-            raise ValueError(
-                f"Expected {len(KG_MASK_TOKENS)} mask token IDs, got {len(self.masks)}."
-            )
-
         ids = self.all_ids
         if any(not isinstance(token_id, int) or isinstance(token_id, bool) for token_id in ids):
             raise TypeError("Every Oreo special-token ID must be an integer.")
@@ -54,21 +40,15 @@ class OreoSpecialTokenIds:
             self.source_entity,
             self.relation,
             self.target_entity,
-            self.reconstruct,
-            self.answer,
-            *self.masks,
         )
 
-    def as_config_dict(self) -> dict[str, int | list[int]]:
+    def as_config_dict(self) -> dict[str, int]:
         """Return JSON-serializable fields for a future OreoQwen3Config."""
 
         return {
             "oreo_source_entity_token_id": self.source_entity,
             "oreo_relation_token_id": self.relation,
             "oreo_target_entity_token_id": self.target_entity,
-            "oreo_reconstruct_token_id": self.reconstruct,
-            "oreo_answer_token_id": self.answer,
-            "oreo_mask_token_ids": list(self.masks),
         }
 
     @classmethod
@@ -91,9 +71,6 @@ class OreoSpecialTokenIds:
             source_entity=ids[0],
             relation=ids[1],
             target_entity=ids[2],
-            reconstruct=ids[3],
-            answer=ids[4],
-            masks=ids[5:],
         )
 
 

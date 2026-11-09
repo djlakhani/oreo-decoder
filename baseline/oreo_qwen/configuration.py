@@ -35,9 +35,6 @@ class OreoQwen3Config(Qwen3Config):
         oreo_source_entity_token_id: int | None = None,
         oreo_relation_token_id: int | None = None,
         oreo_target_entity_token_id: int | None = None,
-        oreo_reconstruct_token_id: int | None = None,
-        oreo_answer_token_id: int | None = None,
-        oreo_mask_token_ids: list[int] | tuple[int, ...] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -60,11 +57,6 @@ class OreoQwen3Config(Qwen3Config):
         self.oreo_source_entity_token_id = oreo_source_entity_token_id
         self.oreo_relation_token_id = oreo_relation_token_id
         self.oreo_target_entity_token_id = oreo_target_entity_token_id
-        self.oreo_reconstruct_token_id = oreo_reconstruct_token_id
-        self.oreo_answer_token_id = oreo_answer_token_id
-        self.oreo_mask_token_ids = (
-            None if oreo_mask_token_ids is None else list(oreo_mask_token_ids)
-        )
 
         self._validate_oreo_fields()
 
@@ -121,9 +113,6 @@ class OreoQwen3Config(Qwen3Config):
             self.oreo_source_entity_token_id,
             self.oreo_relation_token_id,
             self.oreo_target_entity_token_id,
-            self.oreo_reconstruct_token_id,
-            self.oreo_answer_token_id,
-            self.oreo_mask_token_ids,
         )
         if all(value is None for value in token_fields):
             return
@@ -161,9 +150,6 @@ class OreoQwen3Config(Qwen3Config):
             self.oreo_source_entity_token_id,
             self.oreo_relation_token_id,
             self.oreo_target_entity_token_id,
-            self.oreo_reconstruct_token_id,
-            self.oreo_answer_token_id,
-            self.oreo_mask_token_ids,
         )
         if all(value is None for value in fields):
             return None
@@ -173,9 +159,6 @@ class OreoQwen3Config(Qwen3Config):
             source_entity=self.oreo_source_entity_token_id,
             relation=self.oreo_relation_token_id,
             target_entity=self.oreo_target_entity_token_id,
-            reconstruct=self.oreo_reconstruct_token_id,
-            answer=self.oreo_answer_token_id,
-            masks=tuple(self.oreo_mask_token_ids),
         )
 
     def set_oreo_special_token_ids(self, token_ids: OreoSpecialTokenIds) -> None:

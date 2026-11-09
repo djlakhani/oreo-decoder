@@ -22,7 +22,9 @@ OreoQwen3ForCausalLM
 ├── OreoQwen3Model
 │   ├── Qwen token embeddings
 │   ├── Qwen decoder layers
+│   ├── pre-KIL marker-context attention
 │   ├── KIL/KG reasoner
+│   ├── post-KIL T_ENT broadcast attention
 │   └── final Qwen RMSNorm
 └── tied language-model head
 ```
@@ -50,13 +52,15 @@ boundaries will be supported.
 `OreoQwen3Model` is the backbone without the vocabulary projection. It will:
 
 1. Embed input tokens.
-2. Prepare local entity embeddings and initialize the mention-level entity
+2. Run the native Qwen decoder-layer loop.
+3. At every configured boundary, contextualize only the three marker states
+   with prompt-only bidirectional attention.
+4. Prepare local entity embeddings and initialize the mention-level entity
    state once before the first KIL.
-3. Run the native Qwen decoder-layer loop.
-4. Invoke a KIL after each configured layer boundary.
-5. Thread the entity state explicitly from one KIL to the next.
-6. Apply Qwen's final RMSNorm.
-7. Return hidden states, cache data, auxiliary losses, and optional KG
+5. Invoke the KIL and thread the entity state explicitly between KILs.
+6. Broadcast each post-KIL `T_ENT` state only to tokens strictly after it.
+7. Apply Qwen's final RMSNorm.
+8. Return hidden states, cache data, auxiliary losses, and optional KG
    diagnostics.
 
 The implementation will preserve Qwen decoder-layer modules, RoPE, attention
@@ -82,10 +86,42 @@ The three coefficients are configurable and default to `1.0`. Full fine-tuning
 of Qwen, KIL modules, KG memories, and new token embeddings is the initial
 training mode.
 
-During cached greedy generation, KILs run during prompt prefill. They are skipped
-on subsequent one-token cached decoding calls because the marker positions occur
-in the prompt and their effects are already represented in downstream KV caches.
-Beam-search graph expansion is deferred.
+During cached greedy generation, pre-KIL contextualization and KG reasoning run
+during prompt prefill. They are skipped on subsequent one-token decoding calls.
+Each post-KIL layer keeps its own cached key/value states and continues to run so
+new tokens can read preceding prompt `T_ENT` states. Beam-search graph expansion
+is deferred.
+
+## Trainable Interaction Layers
+
+Every KIL is wrapped by two separately parameterized attention adapters. They
+reuse Qwen's grouped-query head layout (`num_attention_heads`,
+`num_key_value_heads`, and `head_dim`), Q/K RMSNorm, dropout setting, and linear
+projection shapes. They are attention adapters rather than full Qwen decoder
+blocks: neither adds a self-attention causal path over ordinary tokens nor an
+unconditional MLP.
+
+The pre-KIL adapter gathers the `S_ENT`, `REL`, and `T_ENT` states for each
+mention as queries. Those queries may attend to every active prompt token in the
+same example, regardless of whether it occurs before or after the marker. Only
+the three marker rows are written back. During teacher forcing, assistant
+content is excluded using `assistant_content_start_positions`, so a marker
+cannot read the target answer. The causal Qwen states used as prompt memory also
+cannot have encoded a later answer.
+
+The post-KIL adapter uses all sequence states as queries but exposes only
+`T_ENT` rows as keys and values. Its mask is strict: a query at position `q` may
+read a target marker at position `t` only when `t < q`. It never attends to an
+ordinary token through this branch. The update is residual and uses branch-only
+pre-normalization; there is no post-residual normalization. A query with no
+eligible target marker receives a forced zero branch output, so its
+representation remains bit-for-bit unchanged.
+
+Both adapters use a scalar `tanh` residual gate initialized to zero. This keeps
+a newly converted native-Qwen checkpoint behaviorally unchanged before
+fine-tuning and lets training open the new paths gradually. It also means the
+gate learns on the first optimization step while its attention projections
+begin receiving task gradients once the gate moves away from zero.
 
 ## KG Reasoning Semantics
 
@@ -152,51 +188,52 @@ Qwen3-4B
 ### Stage 1 — Salient-span reconstruction pretraining
 
 The initial training corpus consists of the span-corrupted Wikipedia data used
-by OreoLM. Reconstruction samples contain marked mentions, a local graph, a
-reconstruction delimiter, and one unique sentinel for each selected span
-occurrence:
+by OreoLM. Reconstruction samples contain marked mentions, a local graph, and
+one unique textual blank identifier for each selected span occurrence:
 
 ```text
-<marked and corrupted passage> <|kg_reconstruct|>
-<|kg_mask_0|> first span <|kg_mask_1|> second span ... EOS
+user: <marked and corrupted passage containing [BLANK_i] identifiers>
+assistant: [BLANK_0] first span [BLANK_1] second span ... EOS
 ```
 
-All labels from the beginning of the passage through `<|kg_reconstruct|>` are
-`-100`. Every suffix token beginning with `<|kg_mask_0|>`, including sentinels,
+All system, user, and assistant-header labels are `-100`. Every assistant
+content token beginning with `[BLANK_0]`, including blank identifiers,
 reconstructed span tokens, and EOS, contributes to causal-LM loss.
 
-Sixteen sentinels, `<|kg_mask_0|>` through `<|kg_mask_15|>`, are reserved. If the
-same entity is masked in multiple locations, each occurrence receives a distinct
-sentinel so its exact surface form can be reconstructed.
+The preprocessing configuration initially limits examples to sixteen textual
+blank identifiers. If the same entity is masked in multiple locations, each
+occurrence receives a distinct identifier so its exact surface form can be
+reconstructed.
 
 This stage also uses the entity-linking and weak relation-path objectives when
 their targets are available. It does not require QA examples and does not train
-`<|kg_answer|>` behavior.
+an additional task token.
 
 ### Stage 2 — Benchmark adaptive QA fine-tuning
 
 For each benchmark, such as NaturalQuestions, entity mentions in the question
-are linked and marked, a local KG is supplied, and the answer is appended after
-the answer delimiter:
+are linked and marked, a local KG is supplied, and the answer is serialized as
+assistant content:
 
 ```text
-Where was <|s_ent|> Albert Einstein <|rel|> <|t_ent|>
-born, and in which country is that city? <|kg_answer|> Germany EOS
+user: Where was Albert Einstein <|s_ent|> <|rel|> <|t_ent|>
+      born, and in which country is that city?
+assistant: Germany EOS
 ```
 
-All labels through `<|kg_answer|>` are `-100`; only answer tokens and EOS are
-supervised. Entity-link and relation targets are optional in this stage because
-QA benchmarks generally do not provide gold reasoning paths. Even without
-auxiliary targets, answer loss remains differentiable through the KILs.
+All system, user, and assistant-header labels are `-100`; only answer tokens and
+EOS are supervised. Entity-link and relation targets are optional in this stage
+because QA benchmarks generally do not provide gold reasoning paths. Even
+without auxiliary targets, answer loss remains differentiable through the KILs.
 
 The raw-Qwen control starts from the same Qwen3-4B base checkpoint and undergoes
 the same benchmark adaptive fine-tuning, but it does not receive a graph or run
 KILs. The primary controlled comparison uses the same marked textual prompt and
-`<|kg_answer|>` delimiter for both models so the presence of text and special
-tokens is held constant. Both models use the same train/dev/test split, answer
-targets, optimization budget, decoding settings, and evaluator. A separate
-plain-question raw-Qwen result may be reported as an additional ablation, but it
-is not a third training stage.
+chat template for both models so the presence of text and role tokens is held
+constant. Both models use the same train/dev/test split, answer targets,
+optimization budget, decoding settings, and evaluator. A separate plain-question
+raw-Qwen result may be reported as an additional ablation, but it is not a third
+training stage.
 
 ## Review-Gated Phases
 
@@ -218,10 +255,9 @@ is not a third training stage.
   positions, initialization modes, auxiliary-target masks, and invalid inputs.
 - Leave SSM corruption, QA serialization, collators, and all real dataset
   construction to Phase 4.
-- Deferred consideration: prompt-only inference batches are accepted, but Phase
-  1 does not require validation that `<|kg_answer|>` is the final active prompt
-  token. Add a mode-aware inference-delimiter check later if stricter generation
-  preflight validation proves useful.
+- Prompt-only inference batches rely on Qwen's assistant generation prompt. The
+  collator records assistant-content start positions for teacher-forced label
+  validation, without introducing a task delimiter token.
 - Stop for review and revisions.
 
 ### Phase 2 — KG Reasoner
@@ -281,5 +317,6 @@ is not a third training stage.
   generation and metric pipeline.
 - Full-Wikidata memory sharding, distributed training, and beam search are
   deferred from the baseline.
-- The decoder causal-attention limitation is intentionally out of scope for this
-  baseline.
+- Direct tests cover prompt/answer isolation, bidirectional prompt access,
+  strict preceding-`T_ENT` masking, exact no-memory identity, grouped-query head
+  dimensions, gradients, and cached-decoding equivalence.

@@ -26,6 +26,11 @@ from transformers.utils.output_capturing import capture_outputs
 
 from .configuration import OreoQwen3Config
 from .contracts import KGInputBatch, OreoQwenBatch
+from .interaction import (
+    CausalTentBroadcastLayer,
+    MarkerContextualizationLayer,
+    ensure_tent_cache_layers,
+)
 from .reasoner import KGReasoner
 from .tokens import OreoSpecialTokenIds, register_oreo_special_tokens
 
@@ -60,7 +65,22 @@ class OreoQwen3Model(Qwen3Model):
 
     def __init__(self, config: OreoQwen3Config) -> None:
         super().__init__(config)
-        self.reasoner = KGReasoner(config.reasoner_config)
+        reasoner_config = config.reasoner_config
+        self.reasoner = KGReasoner(reasoner_config)
+        self.pre_kil_layers = nn.ModuleList(
+            MarkerContextualizationLayer(reasoner_config, config)
+            for _ in range(config.num_kil_steps)
+        )
+        self.post_kil_layers = nn.ModuleList(
+            CausalTentBroadcastLayer(
+                reasoner_config,
+                config,
+                cache_layer_index=config.num_hidden_layers + step_index,
+            )
+            for step_index in range(config.num_kil_steps)
+        )
+        self.pre_kil_layers.apply(self._init_weights)
+        self.post_kil_layers.apply(self._init_weights)
 
     @merge_with_config_defaults
     @capture_outputs
@@ -73,6 +93,7 @@ class OreoQwen3Model(Qwen3Model):
         inputs_embeds: Tensor | None = None,
         use_cache: bool | None = None,
         output_kg_diagnostics: bool | None = None,
+        assistant_content_start_positions: Tensor | None = None,
         kg_mention_batch: Tensor | None = None,
         kg_src_positions: Tensor | None = None,
         kg_rel_positions: Tensor | None = None,
@@ -124,6 +145,7 @@ class OreoQwen3Model(Qwen3Model):
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
                 attention_mask=validation_attention_mask,
+                assistant_content_start_positions=assistant_content_start_positions,
                 kg=kg,
             ).validate(
                 spec=self.config.reasoner_config.contract_spec,
@@ -139,6 +161,11 @@ class OreoQwen3Model(Qwen3Model):
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
+        if use_cache and past_key_values is not None:
+            ensure_tent_cache_layers(
+                past_key_values,
+                self.config.num_hidden_layers + self.config.num_kil_steps,
+            )
 
         if position_ids is None:
             position_ids = (
@@ -163,6 +190,19 @@ class OreoQwen3Model(Qwen3Model):
                 )
 
         hidden_states = inputs_embeds
+        prompt_mask = (
+            _build_prompt_mask(
+                attention_mask=attention_mask,
+                batch_size=hidden_states.shape[0],
+                sequence_length=hidden_states.shape[1],
+                device=hidden_states.device,
+                assistant_content_start_positions=(
+                    assistant_content_start_positions if run_kg else None
+                ),
+            )
+            if run_kg
+            else None
+        )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         diagnostics_enabled = (
             self.config.output_kg_diagnostics
@@ -196,25 +236,40 @@ class OreoQwen3Model(Qwen3Model):
             )
 
             completed_layers = layer_index + 1
-            if run_kg and completed_layers in step_by_boundary:
-                if initialization is None:
-                    initialization = self.reasoner.initialize(hidden_states, kg)
-                    reasoner_state = initialization.state
+            step_index = step_by_boundary.get(completed_layers)
+            if step_index is not None and kg is not None:
+                if run_kg:
+                    hidden_states = self.pre_kil_layers[step_index](
+                        hidden_states,
+                        kg,
+                        prompt_mask,
+                    )
+                    if initialization is None:
+                        initialization = self.reasoner.initialize(hidden_states, kg)
+                        reasoner_state = initialization.state
+                        if diagnostics_enabled:
+                            entity_states.append(reasoner_state.entity_probs)
+
+                    step_output = self.reasoner(
+                        hidden_states,
+                        kg,
+                        reasoner_state,
+                        step_index,
+                    )
+                    hidden_states = step_output.hidden_states
+                    reasoner_state = step_output.state
+                    relation_losses.append(step_output.relation_loss)
                     if diagnostics_enabled:
                         entity_states.append(reasoner_state.entity_probs)
+                        relation_probabilities.append(step_output.relation_probs)
 
-                step_output = self.reasoner(
+                hidden_states = self.post_kil_layers[step_index](
                     hidden_states,
                     kg,
-                    reasoner_state,
-                    step_by_boundary[completed_layers],
+                    past_seen_tokens=past_seen_tokens,
+                    past_key_values=past_key_values,
+                    use_cache=bool(use_cache),
                 )
-                hidden_states = step_output.hidden_states
-                reasoner_state = step_output.state
-                relation_losses.append(step_output.relation_loss)
-                if diagnostics_enabled:
-                    entity_states.append(reasoner_state.entity_probs)
-                    relation_probabilities.append(step_output.relation_probs)
 
         hidden_states = self.norm(hidden_states)
         relation_loss = (
@@ -270,6 +325,7 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         use_cache: bool | None = None,
         logits_to_keep: int | Tensor = 0,
         output_kg_diagnostics: bool | None = None,
+        assistant_content_start_positions: Tensor | None = None,
         kg_mention_batch: Tensor | None = None,
         kg_src_positions: Tensor | None = None,
         kg_rel_positions: Tensor | None = None,
@@ -287,6 +343,10 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         kg_relation_target_mask: Tensor | None = None,
         **kwargs: Any,
     ) -> OreoCausalLMOutputWithPast:
+        resolved_assistant_starts = _resolve_assistant_content_starts(
+            labels,
+            assistant_content_start_positions,
+        )
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -295,6 +355,7 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_kg_diagnostics=output_kg_diagnostics,
+            assistant_content_start_positions=resolved_assistant_starts,
             kg_mention_batch=kg_mention_batch,
             kg_src_positions=kg_src_positions,
             kg_rel_positions=kg_rel_positions,
@@ -450,6 +511,64 @@ def _build_kg_input(**values: Tensor | None) -> KGInputBatch | None:
             + "."
         )
     return KGInputBatch(**values)
+
+
+def _resolve_assistant_content_starts(
+    labels: Tensor | None,
+    explicit_starts: Tensor | None,
+) -> Tensor | None:
+    if explicit_starts is not None or labels is None:
+        return explicit_starts
+    positions = torch.arange(labels.shape[1], device=labels.device)
+    candidates = positions.unsqueeze(0).expand_as(labels)
+    sentinel = torch.full_like(candidates, labels.shape[1])
+    return torch.where(labels != -100, candidates, sentinel).min(dim=1).values
+
+
+def _build_prompt_mask(
+    *,
+    attention_mask: Tensor | dict[str, Tensor] | None,
+    batch_size: int,
+    sequence_length: int,
+    device: torch.device,
+    assistant_content_start_positions: Tensor | None,
+) -> Tensor:
+    if isinstance(attention_mask, dict):
+        raise ValueError(
+            "KG marker contextualization requires a two-dimensional attention_mask."
+        )
+    if attention_mask is None:
+        active = torch.ones(
+            (batch_size, sequence_length),
+            dtype=torch.bool,
+            device=device,
+        )
+    else:
+        if tuple(attention_mask.shape) != (batch_size, sequence_length):
+            raise ValueError("attention_mask must have shape [batch, sequence].")
+        active = attention_mask.bool()
+
+    if assistant_content_start_positions is None:
+        return active
+    if (
+        assistant_content_start_positions.dtype != torch.long
+        or assistant_content_start_positions.device != device
+        or tuple(assistant_content_start_positions.shape) != (batch_size,)
+    ):
+        raise ValueError(
+            "assistant_content_start_positions must be a torch.long tensor "
+            "with shape [batch] on the language-input device."
+        )
+    if torch.any(assistant_content_start_positions < 0) or torch.any(
+        assistant_content_start_positions > sequence_length
+    ):
+        raise ValueError(
+            "assistant_content_start_positions values must lie in [0, sequence_length]."
+        )
+    positions = torch.arange(sequence_length, device=device)
+    return active & (
+        positions.unsqueeze(0) < assistant_content_start_positions.unsqueeze(1)
+    )
 
 
 __all__ = [

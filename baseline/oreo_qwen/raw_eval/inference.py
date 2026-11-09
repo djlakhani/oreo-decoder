@@ -224,7 +224,7 @@ def run_inference(
     input_dir: str | Path,
     output_dir: str | Path,
     *,
-    model_name: str = "Qwen/Qwen3-0.6B",
+    model_name: str = "Qwen/Qwen3-4B",
     revision: str | None = None,
     batch_size: int = 4,
     max_input_tokens: int = 8_192,

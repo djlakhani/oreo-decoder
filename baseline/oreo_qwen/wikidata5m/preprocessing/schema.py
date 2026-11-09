@@ -10,10 +10,10 @@ from typing import Any, Mapping
 
 from ..errors import Wikidata5MError
 
-SCHEMA_VERSION = "wiki5m_reconstruction_v1"
+SCHEMA_VERSION = "wiki5m_reconstruction_v2"
 SYSTEM_INSTRUCTION = (
-    "Reconstruct each masked span. Return only each sentinel followed by its "
-    "original text, in sentinel order."
+    "Reconstruct each numbered blank. Return only each blank identifier followed "
+    "by its original text, in numerical order."
 )
 
 
@@ -22,7 +22,7 @@ class PreprocessingError(Wikidata5MError):
 
 
 class RecordValidationError(PreprocessingError):
-    """A generated reconstruction record violates the v1 schema."""
+    """A generated reconstruction record violates the v2 schema."""
 
 
 class CorpusValidationError(PreprocessingError):
@@ -31,7 +31,7 @@ class CorpusValidationError(PreprocessingError):
 
 @dataclass(frozen=True, slots=True)
 class PreprocessConfig:
-    """All behavior that contributes to deterministic v1 output."""
+    """All behavior that contributes to deterministic v2 output."""
 
     schema_version: str = SCHEMA_VERSION
     graph_split: str = "train"
@@ -74,8 +74,6 @@ class PreprocessConfig:
                 raise ValueError(f"{name} must be a nonnegative integer")
         if self.min_context_ngram_tokens > self.max_context_ngram_tokens:
             raise ValueError("minimum context n-gram length exceeds maximum")
-        if self.max_sentinels > 16:
-            raise ValueError("the tokenizer contract provides only 16 mask sentinels")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -332,8 +330,8 @@ def validate_preprocessed_record(
                 raise RecordValidationError("mention QID/dense-ID mapping is stale")
 
     occurrences = record.masked_occurrences
-    if not occurrences or len(occurrences) > 16:
-        raise RecordValidationError("record must contain between 1 and 16 masks")
+    if not occurrences:
+        raise RecordValidationError("record must contain at least one mask")
     if tuple(item.sentinel_index for item in occurrences) != tuple(
         range(len(occurrences))
     ):
@@ -344,7 +342,7 @@ def validate_preprocessed_record(
         raise RecordValidationError("masked occurrences are not in passage order")
     previous_end = 0
     for occurrence in occurrences:
-        if occurrence.sentinel_token != f"<|kg_mask_{occurrence.sentinel_index}|>":
+        if occurrence.sentinel_token != f"[BLANK_{occurrence.sentinel_index}]":
             raise RecordValidationError("sentinel token does not match sentinel index")
         if occurrence.start_char < previous_end or occurrence.end_char <= occurrence.start_char:
             raise RecordValidationError("masked occurrence spans overlap or are empty")

@@ -42,7 +42,7 @@ def render_native_passage(record: PreprocessedRecord, passage: str) -> str:
         if occurrence.start_char < cursor:
             raise ValueError("masked occurrences overlap")
         chunks.append(passage[cursor : occurrence.start_char])
-        chunks.append(f"[BLANK_{occurrence.sentinel_index}]")
+        chunks.append(occurrence.sentinel_token)
         cursor = occurrence.end_char
     chunks.append(passage[cursor:])
     return "".join(chunks)

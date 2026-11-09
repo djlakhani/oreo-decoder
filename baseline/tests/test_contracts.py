@@ -17,9 +17,6 @@ SPECIAL_IDS = OreoSpecialTokenIds(
     source_entity=10,
     relation=11,
     target_entity=12,
-    reconstruct=14,
-    answer=13,
-    masks=tuple(range(100, 116)),
 )
 SPEC = KGContractSpec(num_entities=1_000, num_relations=2, num_kil_steps=2)
 
@@ -27,8 +24,8 @@ SPEC = KGContractSpec(num_entities=1_000, num_relations=2, num_kil_steps=2)
 def make_valid_batch(*, use_soft_initialization: bool = False) -> OreoQwenBatch:
     input_ids = torch.tensor(
         [
-            [10, 20, 11, 12, 30, 13, 40, 2, 0],
-            [10, 21, 11, 12, 31, 13, 41, 2, 0],
+            [10, 20, 11, 12, 30, 50, 40, 2, 0],
+            [10, 21, 11, 12, 31, 51, 41, 2, 0],
         ],
         dtype=torch.long,
     )
@@ -82,6 +79,7 @@ def make_valid_batch(*, use_soft_initialization: bool = False) -> OreoQwenBatch:
         input_ids=input_ids,
         attention_mask=attention_mask,
         labels=labels,
+        assistant_content_start_positions=torch.tensor([6, 6]),
         kg=kg,
     )
 
@@ -91,7 +89,6 @@ class OreoQwenBatchTests(unittest.TestCase):
         batch.validate(
             spec=SPEC,
             special_token_ids=SPECIAL_IDS,
-            expected_delimiter_token_id=SPECIAL_IDS.answer,
         )
 
     def test_valid_hard_initialization_and_flattened_kwargs(self) -> None:
@@ -103,6 +100,7 @@ class OreoQwenBatchTests(unittest.TestCase):
         self.assertIn("kg_node_batch", kwargs)
         self.assertIn("kg_initial_node_indices", kwargs)
         self.assertNotIn("kg_initial_entity_probs", kwargs)
+        self.assertIn("assistant_content_start_positions", kwargs)
         self.assertNotIn("kg", kwargs)
 
     def test_valid_soft_initialization(self) -> None:
@@ -119,31 +117,17 @@ class OreoQwenBatchTests(unittest.TestCase):
             input_ids=source.input_ids,
             attention_mask=source.attention_mask,
             labels=source.labels,
+            assistant_content_start_positions=source.assistant_content_start_positions,
         )
-        batch.validate(
-            special_token_ids=SPECIAL_IDS,
-            expected_delimiter_token_id=SPECIAL_IDS.answer,
-        )
+        batch.validate(special_token_ids=SPECIAL_IDS)
 
-    def test_reconstruction_suffix_must_start_with_first_sentinel(self) -> None:
+    def test_assistant_content_start_must_point_to_supervised_content(self) -> None:
         batch = make_valid_batch()
-        batch.input_ids[:, 5] = SPECIAL_IDS.reconstruct
-        batch.input_ids[:, 6] = SPECIAL_IDS.masks[0]
-        batch.labels[:, 6] = SPECIAL_IDS.masks[0]
-        batch.validate(
-            spec=SPEC,
-            special_token_ids=SPECIAL_IDS,
-            expected_delimiter_token_id=SPECIAL_IDS.reconstruct,
-        )
+        self.validate(batch)
 
-        batch.input_ids[0, 6] = SPECIAL_IDS.masks[1]
-        batch.labels[0, 6] = SPECIAL_IDS.masks[1]
-        with self.assertRaisesRegex(ContractError, "must begin"):
-            batch.validate(
-                spec=SPEC,
-                special_token_ids=SPECIAL_IDS,
-                expected_delimiter_token_id=SPECIAL_IDS.reconstruct,
-            )
+        batch.assistant_content_start_positions[0] = 8
+        with self.assertRaisesRegex(ContractError, "active token"):
+            self.validate(batch)
 
     def test_cross_component_edge_is_rejected(self) -> None:
         batch = make_valid_batch()
@@ -187,6 +171,12 @@ class OreoQwenBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "padding position"):
             self.validate(batch)
 
+    def test_marker_position_may_not_point_into_assistant_content(self) -> None:
+        batch = make_valid_batch()
+        batch.kg.kg_tgt_positions[0] = 6
+        with self.assertRaisesRegex(ContractError, "before assistant content"):
+            self.validate(batch)
+
     def test_duplicate_fusion_target_is_rejected(self) -> None:
         batch = make_valid_batch()
         batch.kg.kg_mention_batch[1] = 0
@@ -198,13 +188,13 @@ class OreoQwenBatchTests(unittest.TestCase):
     def test_prompt_label_is_rejected(self) -> None:
         batch = make_valid_batch()
         batch.labels[0, 4] = batch.input_ids[0, 4]
-        with self.assertRaisesRegex(ContractError, "Prompt and delimiter"):
+        with self.assertRaisesRegex(ContractError, "Prompt labels"):
             self.validate(batch)
 
     def test_ignored_suffix_label_is_rejected(self) -> None:
         batch = make_valid_batch()
         batch.labels[0, 6] = -100
-        with self.assertRaisesRegex(ContractError, "Every active suffix"):
+        with self.assertRaisesRegex(ContractError, "assistant-content token"):
             self.validate(batch)
 
     def test_relation_target_shape_tracks_kil_count(self) -> None:

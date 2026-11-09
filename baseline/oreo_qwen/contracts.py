@@ -76,6 +76,7 @@ class KGInputBatch:
         input_ids: Tensor | None = None,
         attention_mask: Tensor | None = None,
         special_token_ids: OreoSpecialTokenIds | None = None,
+        assistant_content_start_positions: Tensor | None = None,
     ) -> None:
         """Validate shapes, ownership, marker positions, and supervision."""
 
@@ -156,6 +157,21 @@ class KGInputBatch:
                 active = mention_attention.gather(1, positions.unsqueeze(1)).squeeze(1)
                 if not torch.all(active.bool()):
                     raise ContractError(f"{name} contains a padding position.")
+
+        if assistant_content_start_positions is not None:
+            context_ends = assistant_content_start_positions.index_select(
+                0,
+                self.kg_mention_batch,
+            )
+            for name, positions in (
+                ("kg_src_positions", self.kg_src_positions),
+                ("kg_rel_positions", self.kg_rel_positions),
+                ("kg_tgt_positions", self.kg_tgt_positions),
+            ):
+                if torch.any(positions >= context_ends):
+                    raise ContractError(
+                        f"{name} must occur before assistant content begins."
+                    )
 
         if special_token_ids is not None:
             if input_ids is None:
@@ -277,13 +293,20 @@ class OreoQwenBatch:
     inputs_embeds: Tensor | None = None
     attention_mask: Tensor | None = None
     labels: Tensor | None = None
+    assistant_content_start_positions: Tensor | None = None
     kg: KGInputBatch | None = None
 
     def as_model_kwargs(self) -> dict[str, Any]:
         """Return the flat keyword interface expected by the future model."""
 
         result: dict[str, Any] = {}
-        for name in ("input_ids", "inputs_embeds", "attention_mask", "labels"):
+        for name in (
+            "input_ids",
+            "inputs_embeds",
+            "attention_mask",
+            "labels",
+            "assistant_content_start_positions",
+        ):
             value = getattr(self, name)
             if value is not None:
                 result[name] = value
@@ -296,7 +319,6 @@ class OreoQwenBatch:
         *,
         spec: KGContractSpec | None = None,
         special_token_ids: OreoSpecialTokenIds | None = None,
-        expected_delimiter_token_id: int | None = None,
     ) -> None:
         """Validate language tensors and, when present, the local KG."""
 
@@ -345,11 +367,14 @@ class OreoQwenBatch:
                 if torch.any(self.labels[self.attention_mask == 0] != -100):
                     raise ContractError("Padding positions in labels must be -100.")
 
-        if expected_delimiter_token_id is not None:
-            self._validate_suffix_labels(
-                expected_delimiter_token_id,
-                special_token_ids=special_token_ids,
+        if self.assistant_content_start_positions is not None:
+            self._validate_assistant_content_starts(
+                batch_size=batch_size,
+                sequence_length=sequence_length,
+                device=device,
             )
+            if self.labels is not None:
+                self._validate_assistant_labels()
 
         if self.kg is not None:
             if spec is None:
@@ -362,16 +387,39 @@ class OreoQwenBatch:
                 input_ids=self.input_ids,
                 attention_mask=self.attention_mask,
                 special_token_ids=special_token_ids,
+                assistant_content_start_positions=(
+                    self.assistant_content_start_positions
+                ),
             )
 
-    def _validate_suffix_labels(
+    def _validate_assistant_content_starts(
         self,
-        delimiter_token_id: int,
         *,
-        special_token_ids: OreoSpecialTokenIds | None,
+        batch_size: int,
+        sequence_length: int,
+        device: torch.device,
     ) -> None:
+        starts = self.assistant_content_start_positions
+        _require_tensor("assistant_content_start_positions", starts)
+        if starts.device != device:
+            raise ContractError(
+                "assistant_content_start_positions must be on the language-input device."
+            )
+        _require_long("assistant_content_start_positions", starts)
+        _require_shape("assistant_content_start_positions", starts, (batch_size,))
+        if torch.any(starts < 0) or torch.any(starts > sequence_length):
+            raise ContractError(
+                "assistant_content_start_positions values must lie in "
+                "[0, sequence_length]."
+            )
+
+    def _validate_assistant_labels(self) -> None:
         if self.input_ids is None or self.labels is None:
-            raise ContractError("Suffix-label validation requires input_ids and labels.")
+            raise ContractError(
+                "Assistant-label validation requires input_ids and labels."
+            )
+
+        starts = self.assistant_content_start_positions
 
         active = (
             self.attention_mask.bool()
@@ -381,31 +429,33 @@ class OreoQwenBatch:
         positions = torch.arange(self.input_ids.shape[1], device=self.input_ids.device)
 
         for row in range(self.input_ids.shape[0]):
-            matches = (self.input_ids[row] == delimiter_token_id) & active[row]
-            if matches.sum().item() != 1:
-                raise ContractError(
-                    "Each supervised example must contain exactly one active delimiter token."
-                )
-            delimiter_position = torch.nonzero(matches, as_tuple=False).item()
-            prompt = active[row] & (positions <= delimiter_position)
-            suffix = active[row] & (positions > delimiter_position)
-            if not torch.any(suffix):
-                raise ContractError("A supervised example must contain a nonempty suffix.")
-            if torch.any(self.labels[row, prompt] != -100):
-                raise ContractError("Prompt and delimiter labels must all be -100.")
-            if torch.any(self.labels[row, suffix] == -100):
-                raise ContractError("Every active suffix token must contribute to loss.")
-            if not torch.equal(self.labels[row, suffix], self.input_ids[row, suffix]):
-                raise ContractError("Supervised suffix labels must equal their input token IDs.")
-            if (
-                special_token_ids is not None
-                and delimiter_token_id == special_token_ids.reconstruct
-            ):
-                first_suffix_position = torch.nonzero(suffix, as_tuple=False)[0].item()
-                if self.input_ids[row, first_suffix_position].item() != special_token_ids.masks[0]:
+            start = int(starts[row].item())
+            if start == self.input_ids.shape[1]:
+                if torch.any(self.labels[row, active[row]] != -100):
                     raise ContractError(
-                        "A reconstruction suffix must begin with <|kg_mask_0|>."
+                        "A prompt-only example may not contain supervised labels."
                     )
+                continue
+            if not active[row, start]:
+                raise ContractError(
+                    "Each assistant-content start position must be an active token."
+                )
+            prompt = active[row] & (positions < start)
+            suffix = active[row] & (positions >= start)
+            if not torch.any(suffix):
+                raise ContractError(
+                    "A supervised example must contain nonempty assistant content."
+                )
+            if torch.any(self.labels[row, prompt] != -100):
+                raise ContractError("Prompt labels must all be -100.")
+            if torch.any(self.labels[row, suffix] == -100):
+                raise ContractError(
+                    "Every active assistant-content token must contribute to loss."
+                )
+            if not torch.equal(self.labels[row, suffix], self.input_ids[row, suffix]):
+                raise ContractError(
+                    "Assistant-content labels must equal their input token IDs."
+                )
 
 
 def _require_tensor(name: str, value: Any) -> None:

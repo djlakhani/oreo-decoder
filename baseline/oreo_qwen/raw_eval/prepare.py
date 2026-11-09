@@ -61,7 +61,7 @@ def materialize_eval_example(
     targets = tuple(
         EvalTarget(
             blank_index=occurrence.sentinel_index,
-            blank_token=f"[BLANK_{occurrence.sentinel_index}]",
+            blank_token=occurrence.sentinel_token,
             exact_text=occurrence.exact_text,
             normalized_exact_text=normalize_alias(occurrence.exact_text),
             kind=occurrence.kind,

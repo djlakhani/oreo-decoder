@@ -28,11 +28,16 @@ entity IDs are used only to look up rows in the global entity embedding table.
 | `input_ids` | `[B, L]` | `torch.long` | Yes unless `inputs_embeds` is used | Tokenizer IDs for the complete teacher-forced sequence |
 | `attention_mask` | `[B, L]` | bool or integer | Recommended | `1` for real tokens and `0` for padding |
 | `labels` | `[B, L]` | `torch.long` | Training only | Token IDs at supervised positions and `-100` elsewhere |
+| `assistant_content_start_positions` | `[B]` | `torch.long` | Optional; inferred from `labels` by the LM wrapper | First supervised assistant-content token in each sequence and exclusive end of pre-KIL prompt memory |
 
 The model uses Hugging Face's standard shifted causal loss: the logit at position
-`i - 1` predicts `labels[:, i]`. Prompt, delimiter, and padding positions use
-`-100`. The answer/reconstruction suffix and its terminating EOS token are
-supervised.
+`i - 1` predicts `labels[:, i]`. System, user, assistant-header, and padding
+positions use `-100`. Assistant content and its terminating EOS token are
+supervised. The tensor is forwarded to `model.forward` because it defines the
+pre-KIL attention boundary that prevents teacher-forced answer leakage. If
+`labels` are supplied and this tensor is omitted, the causal-LM wrapper infers
+each row's boundary from its first label other than `-100`. For prompt-only
+generation, both are omitted and every active input token is prompt memory.
 
 When both `input_ids` and `inputs_embeds` are supplied, validation fails. When
 `attention_mask` is omitted, the usual Qwen all-visible non-padding default is
@@ -58,11 +63,36 @@ fusion target:  hidden_states[kg_mention_batch[m], kg_tgt_positions[m]]
 Positions must be in `[0, L)`, point to non-padding tokens, and contain their
 configured marker token IDs when `input_ids` are available. Target `(batch,
 position)` pairs must be unique so two mentions do not perform ambiguous writes
-to the same hidden-state row.
+to the same hidden-state row. When an assistant-content boundary is available,
+all three marker positions must occur strictly before it.
 
 The target position is explicit. The implementation must not infer it as
 `kg_rel_positions + 1`, even if the standard serialization places the two tokens
 next to one another.
+
+## Attention Around Each KIL
+
+At every configured boundary, computation is:
+
+```text
+Qwen hidden states
+    -> prompt-only marker contextualization
+    -> KIL graph reasoning and T_ENT fusion
+    -> strict preceding-T_ENT broadcast
+    -> next Qwen layer group
+```
+
+The pre-KIL layer updates only the `S_ENT`, `REL`, and `T_ENT` rows. Each marker
+query can attend bidirectionally to all active prompt positions in its own batch
+example. It cannot attend to assistant content at or after
+`assistant_content_start_positions`.
+
+The post-KIL layer updates a token only from `T_ENT` positions with a smaller
+sequence index. It does not expose ordinary token rows as attention memory, and
+`T_ENT` does not attend to itself. Its residual branch produces exactly zero
+when no eligible marker precedes the query, leaving that query unchanged. Both
+layers use the same grouped-query head counts and head dimension as the Qwen
+checkpoint, with branch pre-normalization and zero-initialized residual gates.
 
 ## Disjoint-Union Local Graph
 
@@ -151,12 +181,14 @@ Suppose both questions require two hops:
 
 ```text
 Example 0:
-Where was Albert Einstein <|s_ent|> <|rel|> <|t_ent|>
-born, and in which country is that city? <|kg_answer|> Germany EOS
+user: Where was Albert Einstein <|s_ent|> <|rel|> <|t_ent|>
+      born, and in which country is that city?
+assistant: Germany EOS
 
 Example 1:
-Where was Marie Curie <|s_ent|> <|rel|> <|t_ent|>
-born, and in which country is that city? <|kg_answer|> Poland EOS
+user: Where was Marie Curie <|s_ent|> <|rel|> <|t_ent|>
+      born, and in which country is that city?
+assistant: Poland EOS
 ```
 
 The local graphs are:
@@ -232,10 +264,11 @@ kg_initial_entity_probs = torch.tensor([
 It is supplied instead of, not alongside, `kg_initial_node_indices`.
 
 `input_ids`, `attention_mask`, and `labels` have shape `[2, L]`. For example 0,
-all labels through `<|kg_answer|>` are `-100`; the token or tokens encoding
-`Germany` and the final EOS are supervised. Example 1 treats `Poland` the same
-way. Exact positions are derived after tokenization rather than hard-coded from
-the human-readable string.
+all system, user, and assistant-header labels are `-100`; the token or tokens
+encoding `Germany` and the final EOS are supervised. Example 1 treats `Poland`
+the same way. Exact positions, including
+`assistant_content_start_positions`, are derived after chat-template
+tokenization rather than hard-coded from the human-readable string.
 
 ## Two-Stage Training Contract
 
@@ -258,32 +291,29 @@ Register these additional special tokens:
 <|s_ent|>
 <|rel|>
 <|t_ent|>
-<|kg_reconstruct|>
-<|kg_answer|>
-<|kg_mask_0|> ... <|kg_mask_15|>
 ```
 
 The tokenizer's existing EOS and padding conventions are retained. After token
 registration, the model's tied input embedding and LM-head vocabulary is
-resized, and the resulting token IDs are persisted in `OreoQwen3Config`.
+resized, and the resulting three token IDs are persisted in `OreoQwen3Config`.
+Reconstruction blanks such as `[BLANK_0]` use ordinary tokenizer vocabulary;
+task and response boundaries come from Qwen's instruct chat template.
 
 ### Stage 1: salient-span reconstruction pretraining
 
 ```text
-system: Reconstruct each masked span. Return only each sentinel followed by
-        its original text, in sentinel order.
-user: <marked passage containing unique sentinels>
-assistant: <|kg_reconstruct|> <|kg_mask_0|> <span 0>
-           <|kg_mask_1|> <span 1> ... EOS
+system: Reconstruct each numbered blank. Return only each blank identifier
+        followed by its original text, in numerical order.
+user: <marked passage containing unique [BLANK_i] identifiers>
+assistant: [BLANK_0] <span 0>
+           [BLANK_1] <span 1> ... EOS
 ```
 
-The model's instruct chat template supplies the role/control tokens. Everything
-from the first system token through `<|kg_reconstruct|>`, which is the first
-token in the assistant response, has label `-100`. Every token after that
-delimiter, beginning with the first suffix sentinel, is supervised. This
-includes each suffix sentinel, the exact removed surface tokens, and EOS. A
-formatting mistake in the prompt or delimiter is therefore never an LM-loss
-target.
+The model's instruct chat template supplies the role/control tokens. All system,
+user, and assistant-header tokens have label `-100`. Every assistant-content
+token, beginning with `[BLANK_0]`, is supervised. This includes each textual
+blank identifier, the exact removed surface tokens, and EOS. The collator
+records the first such token in `assistant_content_start_positions`.
 
 Every visible resolved entity occurrence is serialized in this order:
 
@@ -292,15 +322,15 @@ entity surface <|s_ent|> <|rel|> <|t_ent|>
 ```
 
 Masked entity occurrences and context-only blanks contain only their unique
-sentinel; they have no surrounding KG markers.
+textual blank identifier; they have no surrounding KG markers.
 
 For example:
 
 ```text
 user: Albert Einstein <|s_ent|> <|rel|> <|t_ent|> was born in
-      <|kg_mask_0|>. <|kg_mask_1|> is located in Germany.
-assistant: <|kg_reconstruct|> <|kg_mask_0|> Ulm
-           <|kg_mask_1|> Ulm EOS
+      [BLANK_0]. [BLANK_1] is located in Germany.
+assistant: [BLANK_0] Ulm
+           [BLANK_1] Ulm EOS
 ```
 
 The two occurrences of `Ulm` receive different sentinels even though they link
@@ -325,13 +355,15 @@ aliases to model tensors.
 ### Stage 2: benchmark adaptive QA fine-tuning
 
 ```text
-<marked question> <|kg_answer|> <answer> EOS
+system: Answer the question concisely.
+user: <marked question>
+assistant: <answer> EOS
 ```
 
-The complete marked question and `<|kg_answer|>` have label `-100`. Every answer
-token and EOS is supervised. Questions must be entity-linked, marked with the
-source/relation/target tokens, and paired with a local graph before they enter
-the Oreo-Qwen collator.
+The complete system/user prompt and assistant header have label `-100`. Every
+answer token and EOS is supervised. Questions must be entity-linked, marked
+with the source/relation/target tokens, and paired with a local graph before
+they enter the Oreo-Qwen collator.
 
 Benchmark QA data does not need gold relation paths. Entity-link and relation
 supervision tensors are optional during adaptive fine-tuning; when absent, their
@@ -339,9 +371,9 @@ losses are zero and answer loss trains the KIL path end to end.
 
 The raw-Qwen control is independently fine-tuned on the same benchmark examples.
 For the primary controlled comparison, it receives the same marked token text
-and `<|kg_answer|>` suffix but no `kg_*` tensors. Its labels and optimization
-budget match Oreo-Qwen. An additional plain-question control can be produced as
-an ablation without changing this two-stage contract.
+and chat serialization but no `kg_*` tensors. Its labels and optimization budget
+match Oreo-Qwen. An additional plain-question control can be produced as an
+ablation without changing this two-stage contract.
 
 ## Optionality
 
@@ -379,7 +411,8 @@ For each Oreo-Qwen evaluation example:
 
 1. Entity-link and mark the question exactly as during adaptive fine-tuning.
 2. Build the local graph and core KG tensors.
-3. Tokenize only the prompt through `<|kg_answer|>`; do not append a gold answer.
+3. Apply the instruct chat template with an assistant generation prompt; do not
+   append a gold answer.
 4. Omit `labels`, entity-link targets, and relation targets.
 5. Call `model.eval()` and `model.generate(...)` under inference mode.
 6. Slice off the input prompt IDs, stop at EOS, and decode only newly generated
@@ -397,16 +430,19 @@ eos_token_id = tokenizer EOS
 pad_token_id = tokenizer padding ID
 ```
 
-KILs run once during prompt prefill. The model's generation adapter carries KG
-arguments into that prefill call and removes or ignores them during cached
-single-token decoding. Generated sequences returned by Hugging Face include the
-prompt, so answer extraction begins at the padded input width returned to
-`generate`, not at a hard-coded textual position.
+KG reasoning and pre-KIL contextualization run once during prompt prefill. The
+KG position tensors remain available during cached single-token decoding so the
+post-KIL adapters can identify target-marker cache rows. Each post-KIL adapter
+caches its prompt keys and values and continues to run for generated tokens;
+its strict mask still exposes only preceding `T_ENT` positions. Generated
+sequences returned by Hugging Face include the prompt, so answer extraction
+begins at the padded input width returned to `generate`, not at a hard-coded
+textual position.
 
 The raw-Qwen control uses its separately fine-tuned checkpoint, the same textual
-prompt through `<|kg_answer|>`, the same decoding configuration, and the same
-answer extraction and metric code. It omits all KG tensors and uses the ordinary
-Qwen generation path.
+prompt and chat template, the same decoding configuration, and the same answer
+extraction and metric code. It omits all KG tensors and uses the ordinary Qwen
+generation path.
 
 Evaluation records also carry non-model metadata outside `model.forward`, at
 minimum:

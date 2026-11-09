@@ -38,7 +38,7 @@ def _build(args: argparse.Namespace) -> None:
     output = (
         Path(args.output).expanduser().resolve()
         if args.output
-        else source / "preprocessed" / "wiki5m_reconstruction_v1"
+        else source / "preprocessed" / "wiki5m_reconstruction_v2"
     )
     with Wikidata5MStore(source / "indexed", source_root=source) as store:
         result = build_preprocessed_corpus(

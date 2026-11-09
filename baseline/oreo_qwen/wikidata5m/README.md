@@ -378,7 +378,7 @@ uv run wikidata5m-preprocess build ../../datasets/Wikidata5M \
 ```
 
 The default output is
-`datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1/`. Shards are
+`datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2/`. Shards are
 deterministic gzip JSONL files over fixed dense entity-ID ranges. Publication is
 atomic, a progress manifest makes completed shards resumable, and the final
 manifest records checksums, counts, rejection reasons, and bounded rejection
@@ -388,13 +388,13 @@ Inspect corpus statistics and validate artifacts:
 
 ```bash
 uv run wikidata5m-preprocess stats \
-  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2
 
 uv run wikidata5m-preprocess validate \
-  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2
 
 uv run wikidata5m-preprocess validate \
-  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v1 \
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2 \
   --full --source ../../datasets/Wikidata5M
 ```
 

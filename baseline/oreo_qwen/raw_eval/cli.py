@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run non-thinking Qwen inference")
     run.add_argument("input")
     run.add_argument("output")
-    run.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    run.add_argument("--model", default="Qwen/Qwen3-4B")
     run.add_argument("--revision")
     run.add_argument("--batch-size", type=int, default=4)
     run.add_argument("--max-input-tokens", type=int, default=8192)
