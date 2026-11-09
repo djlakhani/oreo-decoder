@@ -1,9 +1,9 @@
-# OreoLM–Qwen3-0.6B Baseline Implementation Plan
+# OreoLM–Qwen3-4B Baseline Implementation Plan
 
 ## Purpose
 
 This directory will contain a self-contained baseline that integrates OreoLM-style
-Knowledge Interaction Layers (KILs) into `Qwen/Qwen3-0.6B`.
+Knowledge Interaction Layers (KILs) into `Qwen/Qwen3-4B`.
 
 The baseline is intentionally review-gated. Each phase ends with a hard stop so
 that the implementation can be inspected, discussed, and revised before the next
@@ -41,8 +41,8 @@ blueprint and will store:
 - Diagnostic-output settings.
 
 It validates configuration but performs no forward computation. The default
-Qwen3-0.6B layout has two KILs after completed decoder layers 9 and 19, producing
-groups of 9, 10, and 9 Qwen layers. Other strictly increasing, in-range
+36-layer Qwen3-4B layout has two KILs after completed decoder layers 12 and 24,
+producing three groups of 12 Qwen layers. Other strictly increasing, in-range
 boundaries will be supported.
 
 ### `OreoQwen3Model`
@@ -142,7 +142,7 @@ numerical-safety fallback.
 There are exactly two training stages for the Oreo-Qwen model:
 
 ```text
-Qwen3-0.6B
+Qwen3-4B
     -> Stage 1: Wikipedia salient-span reconstruction pretraining
     -> saved Oreo-Qwen pretraining checkpoint
     -> Stage 2: benchmark-specific adaptive QA fine-tuning
@@ -189,7 +189,7 @@ supervised. Entity-link and relation targets are optional in this stage because
 QA benchmarks generally do not provide gold reasoning paths. Even without
 auxiliary targets, answer loss remains differentiable through the KILs.
 
-The raw-Qwen control starts from the same Qwen3-0.6B base checkpoint and undergoes
+The raw-Qwen control starts from the same Qwen3-4B base checkpoint and undergoes
 the same benchmark adaptive fine-tuning, but it does not receive a graph or run
 KILs. The primary controlled comparison uses the same marked textual prompt and
 `<|kg_answer|>` delimiter for both models so the presence of text and special
@@ -241,7 +241,7 @@ is not a third training stage.
 - Test one- and two-KIL configurations using a tiny Qwen3 model.
 - Run forward/backward tests and verify gradients reach Qwen, KIL modules, KG
   memories, and new token embeddings.
-- Provide an opt-in smoke test for the official Qwen3-0.6B checkpoint.
+- Provide an opt-in smoke test for the official Qwen3-4B checkpoint.
 - Stop for review and revisions.
 
 ### Phase 4 — Batching and Preprocessing

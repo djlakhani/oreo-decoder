@@ -105,9 +105,9 @@ def make_tokenizer() -> PreTrainedTokenizerFast:
 
 
 class OreoQwen3ConfigTests(unittest.TestCase):
-    def test_official_depth_defaults_to_nine_ten_nine_groups(self) -> None:
-        config = make_config(num_hidden_layers=28, kil_layer_boundaries=(9, 19))
-        self.assertEqual(config.kil_layer_boundaries, [9, 19])
+    def test_qwen3_4b_depth_defaults_to_three_twelve_layer_groups(self) -> None:
+        config = make_config(num_hidden_layers=36, kil_layer_boundaries=(12, 24))
+        self.assertEqual(config.kil_layer_boundaries, [12, 24])
         self.assertEqual(config.num_kil_steps, 2)
         self.assertEqual(config.reasoner_config.num_kil_steps, 2)
 
@@ -115,12 +115,12 @@ class OreoQwen3ConfigTests(unittest.TestCase):
             vocab_size=64,
             hidden_size=16,
             intermediate_size=32,
-            num_hidden_layers=28,
+            num_hidden_layers=36,
             num_attention_heads=2,
             num_key_value_heads=1,
             head_dim=8,
         )
-        self.assertEqual(automatic.kil_layer_boundaries, [9, 19])
+        self.assertEqual(automatic.kil_layer_boundaries, [12, 24])
 
     def test_boundaries_are_completed_layer_counts(self) -> None:
         with self.assertRaisesRegex(ValueError, "strictly increasing"):

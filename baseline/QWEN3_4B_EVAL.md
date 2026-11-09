@@ -1,13 +1,13 @@
 # Qwen3-4B Raw Reconstruction Evaluation
 
-This run uses the same prompts, deterministic sample seed, non-thinking chat
-template, greedy decoding, scoring, and S3 bucket as the Qwen3-0.6B baseline.
-It reuses the existing `eval-inputs` shards from S3 whenever available, so the
-two checkpoints see byte-identical evaluation examples.
+This is the native-Qwen control evaluation for the Qwen3-4B OreoLM baseline. It
+uses the established prompts, deterministic sample seed, non-thinking chat
+template, greedy decoding, scoring, and S3 bucket. It reuses the existing
+model-independent `eval-inputs` shards from S3 whenever available.
 
 The checkpoint is [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B), a
 4.0B-parameter BF16 causal model. The raw evaluation explicitly applies
-`enable_thinking=False`, as it did for Qwen3-0.6B.
+`enable_thinking=False`.
 
 ## Storage on a fresh instance
 
@@ -103,7 +103,7 @@ After reviewing the smoke report, run:
 ./20_main_eval_5000_qwen3_4b.sh
 ```
 
-The output directories and S3 prefixes are distinct from Qwen3-0.6B:
+The output directories and S3 prefixes identify the Qwen3-4B checkpoint:
 
 ```text
 eval-runs/qwen3-4b-native-smoke32-v1/

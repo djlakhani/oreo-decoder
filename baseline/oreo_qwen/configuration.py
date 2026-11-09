@@ -70,8 +70,9 @@ class OreoQwen3Config(Qwen3Config):
 
     @staticmethod
     def _default_kil_boundaries(num_hidden_layers: int) -> tuple[int, ...]:
-        if num_hidden_layers == 28:
-            return (9, 19)
+        if num_hidden_layers == 36:
+            # Qwen3-4B: divide the decoder into three equal 12-layer groups.
+            return (12, 24)
         if num_hidden_layers < 2:
             raise ValueError(
                 "Oreo-Qwen requires at least two decoder layers so a KIL can "
