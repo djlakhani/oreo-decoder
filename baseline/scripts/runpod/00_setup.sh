@@ -26,7 +26,10 @@ print_storage_summary
 
 cd "${BASELINE_DIR}"
 uv sync --frozen --extra test
-uv run pytest -q
+# common.sh defines the future dataset location for the other RunPod scripts.
+# Do not let that default opt into tests which require the dataset to have
+# already been downloaded; 01_download_data.sh owns that step.
+env -u WIKIDATA5M_ROOT uv run pytest -q
 
 echo "Downloading model snapshots to the persistent volume cache"
 uv run python - <<'PY'

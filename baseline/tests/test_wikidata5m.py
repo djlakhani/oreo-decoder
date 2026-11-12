@@ -280,8 +280,16 @@ def test_quick_validation_rejects_changed_content_when_mtime_differs(
 ) -> None:
     source, index = built_index
     passage_path = source / "wikidata5m_text.txt"
+    original_stat = passage_path.stat()
     changed = passage_path.read_bytes().replace(b"Two has", b"Two haz", 1)
     passage_path.write_bytes(changed)
+    # A fast rewrite can retain the old timestamp on filesystems with coarse
+    # mtime granularity. Force the condition named by this test so validation
+    # takes its checksum fallback instead of the size-and-mtime fast path.
+    os.utime(
+        passage_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 2_000_000_000),
+    )
     with pytest.raises(StaleIndexError, match="content changed"):
         Wikidata5MStore(index)
 

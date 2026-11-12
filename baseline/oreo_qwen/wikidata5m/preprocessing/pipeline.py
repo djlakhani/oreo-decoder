@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import multiprocessing
 import os
 import tempfile
 from collections import Counter
@@ -690,7 +691,13 @@ def _build_preprocessed_corpus_parallel(
 
     if entries_by_range:
         publish()
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    # Python 3.12 warns when a multithreaded parent forks because inherited
+    # locks can deadlock. Spawn gives every preprocessing worker a clean
+    # interpreter and is portable across the local and RunPod environments.
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
         futures = {
             executor.submit(
                 _build_shard_worker,
