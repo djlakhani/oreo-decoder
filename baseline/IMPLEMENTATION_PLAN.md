@@ -36,16 +36,15 @@ blueprint and will store:
 
 - Standard Qwen architecture fields.
 - Configurable KIL insertion boundaries.
-- Entity and relation vocabulary sizes.
-- Entity and relation embedding dimensions.
-- Entity-linking and relation-loss coefficients.
+- Frozen knowledge-embedding provenance and width.
+- Adapter bottleneck width and relation-loss coefficient.
 - OreoLM special-token IDs.
 - Diagnostic-output settings.
 
 It validates configuration but performs no forward computation. The default
-36-layer Qwen3-4B layout has two KILs after completed decoder layers 12 and 24,
-producing three groups of 12 Qwen layers. Other strictly increasing, in-range
-boundaries will be supported.
+36-layer Qwen3-4B prototype has one KIL after completed decoder layer 34,
+leaving the final two decoder blocks to integrate broadcast knowledge.
+Explicit in-range boundaries remain configurable for later ablations.
 
 ### `OreoQwen3Model`
 
@@ -53,10 +52,10 @@ boundaries will be supported.
 
 1. Embed input tokens.
 2. Run the native Qwen decoder-layer loop.
-3. At every configured boundary, contextualize only the three marker states
+3. At every configured boundary, contextualize only the `REL` and `T_ENT` states
    with prompt-only bidirectional attention.
-4. Prepare local entity embeddings and initialize the mention-level entity
-   state once before the first KIL.
+4. Consume frozen local-node and relation embeddings supplied by the batch and
+   initialize from an externally linked node or distribution.
 5. Invoke the KIL and thread the entity state explicitly between KILs.
 6. Broadcast each post-KIL `T_ENT` state only to tokens strictly after it.
 7. Apply Qwen's final RMSNorm.
@@ -78,13 +77,13 @@ The default training objective is:
 
 ```text
 total_loss = lm_loss
-           + entity_link_loss
-           + relation_loss
+           + relation_loss_weight * relation_loss
 ```
 
-The three coefficients are configurable and default to `1.0`. Full fine-tuning
-of Qwen, KIL modules, KG memories, and new token embeddings is the initial
-training mode.
+The relation coefficient defaults to `1.0`. The frozen embedding encoder,
+resolved knowledge vectors, and complete native Qwen backbone are never
+optimized. Only the bottleneck adapters, interaction layers, relation
+temperature, and two marker-token deltas remain trainable.
 
 During cached greedy generation, pre-KIL contextualization and KG reasoning run
 during prompt prefill. They are skipped on subsequent one-token decoding calls.
@@ -101,10 +100,10 @@ projection shapes. They are attention adapters rather than full Qwen decoder
 blocks: neither adds a self-attention causal path over ordinary tokens nor an
 unconditional MLP.
 
-The pre-KIL adapter gathers the `S_ENT`, `REL`, and `T_ENT` states for each
+The pre-KIL adapter gathers the `REL` and `T_ENT` states for each
 mention as queries. Those queries may attend to every active prompt token in the
 same example, regardless of whether it occurs before or after the marker. Only
-the three marker rows are written back. During teacher forcing, assistant
+the two marker rows are written back. During teacher forcing, assistant
 content is excluded using `assistant_content_start_positions`, so a marker
 cannot read the target answer. The causal Qwen states used as prompt memory also
 cannot have encoded a later answer.
@@ -127,17 +126,18 @@ begin receiving task gradients once the gate moves away from zero.
 
 The reasoner will contain:
 
-- A dense raw entity embedding table.
-- A shared relation-key memory.
-- An entity predictor for learned initialization when no external entity state
-  is supplied.
-- A separate relation-prediction head for each KIL step.
+- A trainable relation-query bottleneck for each KIL step.
 - A sparse graph walker implemented with native PyTorch indexing and scatter
   operations.
-- A separate entity-value projection and fusion module for each KIL step.
+- A trainable frozen-entity-to-Qwen bottleneck and fusion module per step.
 
-The raw entity embeddings are aggregated using the walked entity distribution
-before the step-specific value projection is applied. The projected value is
+The frozen Qwen3-Embedding-0.6B encoder lives outside the language model. An
+on-demand CPU cache batches unseen entity text, while all 828 relation vectors
+may be precomputed. Neither the encoder nor cached vectors enter the optimizer
+or Oreo checkpoint.
+
+The frozen local entity embeddings are aggregated using the walked entity
+distribution before the step-specific value projection is applied. The projected value is
 added to the target-marker hidden state and passed through Qwen RMSNorm. The
 per-batch entity state is passed explicitly through the forward call; it must not
 be stored as mutable module state.
@@ -205,9 +205,8 @@ blank identifiers. If the same entity is masked in multiple locations, each
 occurrence receives a distinct identifier so its exact surface form can be
 reconstructed.
 
-This stage also uses the entity-linking and weak relation-path objectives when
-their targets are available. It does not require QA examples and does not train
-an additional task token.
+This stage also uses weak relation-path supervision when available. Entity
+linking is performed by preprocessing and is not a model objective.
 
 ### Stage 2 — Benchmark adaptive QA fine-tuning
 
@@ -216,13 +215,13 @@ are linked and marked, a local KG is supplied, and the answer is serialized as
 assistant content:
 
 ```text
-user: Where was Albert Einstein <|s_ent|> <|rel|> <|t_ent|>
+user: Where was Albert Einstein <|rel|> <|t_ent|>
       born, and in which country is that city?
 assistant: Germany EOS
 ```
 
 All system, user, and assistant-header labels are `-100`; only answer tokens and
-EOS are supervised. Entity-link and relation targets are optional in this stage
+EOS are supervised. Relation targets are optional in this stage
 because QA benchmarks generally do not provide gold reasoning paths. Even
 without auxiliary targets, answer loss remains differentiable through the KILs.
 
@@ -262,9 +261,9 @@ training stage.
 
 ### Phase 2 — KG Reasoner
 
-- Implement entity and relation memories, entity initialization, per-step
-  relation predictors, the fixed inverse-degree walker, raw-entity aggregation,
-  and residual fusion.
+- Implement external frozen-embedding inputs, required linked initialization,
+  relation and entity bottlenecks, the fixed inverse-degree walker, frozen-value
+  aggregation, and residual fusion.
 - Test hand-computed transitions, global normalization, zero-score fallback,
   component isolation, loss masks, and gradients.
 - Stop for review and revisions.
@@ -274,9 +273,10 @@ training stage.
 - Implement the custom configuration, backbone, causal-LM wrapper, model output
   objects, configurable KIL placement, checkpoint loading, save/load, and cached
   greedy generation.
-- Test one- and two-KIL configurations using a tiny Qwen3 model.
-- Run forward/backward tests and verify gradients reach Qwen, KIL modules, KG
-  memories, and new token embeddings.
+- Test the one-KIL configuration using a tiny Qwen3 model.
+- Run forward/backward tests and verify gradients pass through frozen Qwen to
+  the KIL adapters, interaction layers, and marker-token deltas, while native
+  Qwen parameters and frozen knowledge data receive no gradients.
 - Provide an opt-in smoke test for the official Qwen3-4B checkpoint.
 - Stop for review and revisions.
 
@@ -286,16 +286,16 @@ training stage.
 - Add benchmark adapters that entity-link and mark questions, construct local
   graphs, and produce Stage 2 answer suffixes.
 - Build disjoint-union graph batching and edge-index offsets.
-- Build marker-position extraction, suffix-only labels, relation targets, and
-  entity-link targets.
+- Build marker-position extraction, suffix-only labels, linked initial nodes,
+  frozen embedding resolution, and relation targets.
 - Add end-to-end dataset-to-loss tests.
 - Stop for review before any full training run.
 
 ### Phase 5 — Training and Benchmark Evaluation
 
 - Run Stage 1 reconstruction pretraining and save a resumable checkpoint that
-  includes Qwen weights, KILs, KG memories, tokenizer, configuration, optimizer,
-  scheduler, and progress state.
+  includes frozen Qwen weights, KIL adapters, tokenizer, configuration, the
+  Oreo-only optimizer, scheduler, and progress state.
 - Adaptively fine-tune the Oreo-Qwen checkpoint and a separately initialized raw
   Qwen control on each benchmark's training split.
 - Implement prompt-only generation, answer extraction, benchmark-specific answer

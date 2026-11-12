@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 from ..errors import Wikidata5MError
 
-SCHEMA_VERSION = "wiki5m_reconstruction_v2"
+SCHEMA_VERSION = "wiki5m_reconstruction_v3"
 SYSTEM_INSTRUCTION = (
     "Reconstruct each numbered blank. Return only each blank identifier followed "
     "by its original text, in numerical order."

@@ -4,3 +4,4 @@ __pycache__/
 .coverage
 *.py[cod]
 *.egg-info/
+scripts/runpod/runpod_env.sh

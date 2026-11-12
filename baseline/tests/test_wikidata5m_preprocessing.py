@@ -100,8 +100,10 @@ def test_single_passage_record_and_rendering(preprocessing_store) -> None:
     for occurrence in record.masked_occurrences:
         assert occurrence.sentinel_token in rendered.corrupted_passage
         assert f"{occurrence.sentinel_token} {occurrence.exact_text}" in rendered.reconstruction_suffix
-    assert "Mira Chen <|s_ent|> <|rel|> <|t_ent|>" in rendered.corrupted_passage or (
-        "Northbridge University <|s_ent|> <|rel|> <|t_ent|>" in rendered.corrupted_passage
+    marked_mira = "Mira Chen <|rel|> <|t_ent|>"
+    marked_northbridge = "Northbridge University <|rel|> <|t_ent|>"
+    assert marked_mira in rendered.corrupted_passage or (
+        marked_northbridge in rendered.corrupted_passage
     )
     assert "[BLANK_" in rendered.corrupted_passage
     assert any(item.kind == "context_only" for item in record.masked_occurrences)
@@ -175,11 +177,18 @@ def test_corpus_is_deterministic_and_validated(preprocessing_store, tmp_path: Pa
     config = PreprocessConfig(shard_entity_count=3)
     first = build_preprocessed_corpus(store, tmp_path / "first", config)
     second = build_preprocessed_corpus(store, tmp_path / "second", config)
+    parallel = build_preprocessed_corpus(
+        store, tmp_path / "parallel", config, workers=2
+    )
     first_manifest = validate_preprocessed_corpus(first, store=store, full=True)
     second_manifest = validate_preprocessed_corpus(second, store=store, full=True)
+    parallel_manifest = validate_preprocessed_corpus(parallel, store=store, full=True)
     assert first_manifest["records"] == second_manifest["records"] == 1
     assert [item["sha256"] for item in first_manifest["shards"]] == [
         item["sha256"] for item in second_manifest["shards"]
+    ]
+    assert [item["sha256"] for item in first_manifest["shards"]] == [
+        item["sha256"] for item in parallel_manifest["shards"]
     ]
     assert first_manifest["statistics"]["inspected"] == store.entity_count
 

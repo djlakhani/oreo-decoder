@@ -61,7 +61,7 @@ Those decisions must not leak into the passage annotation schema.
 | Auxiliary target | A matched primary-star entity with a visible nested-star supporter |
 | Context-only blank | A repeated textual span selected without an entity or graph target |
 | Visible supporter | A resolved, unmasked entity with a directed edge into a selected target |
-| Marker block | `<|s_ent|> <|rel|> <|t_ent|>` inserted after a visible entity mention |
+| Marker block | `<|rel|> <|t_ent|>` inserted after a visible, externally linked entity mention |
 
 ## Fixed Defaults
 
@@ -69,7 +69,7 @@ The first implementation uses the following versioned defaults:
 
 | Setting | Value |
 |---|---:|
-| Preprocessing schema | `wiki5m_reconstruction_v2` |
+| Preprocessing schema | `wiki5m_reconstruction_v3` |
 | Graph split | `train` only |
 | Maximum incoming degree considered | `1,000` |
 | Maximum aliases considered per QID | `64` |
@@ -365,7 +365,7 @@ A primary-star entity `C` is eligible as an auxiliary target when:
 Eligible auxiliary QIDs are ordered by the SHA-256 digest of:
 
 ```text
-wiki5m_reconstruction_v2\0<PASSAGE_QID>\0<CANDIDATE_QID>
+wiki5m_reconstruction_v3\0<PASSAGE_QID>\0<CANDIDATE_QID>
 ```
 
 Digests are compared lexicographically, with numeric QID as a final tie-break.
@@ -417,7 +417,7 @@ character spans. Enumerate contiguous one- through four-token n-grams that:
 Rank normalized candidate forms using SHA-256 of:
 
 ```text
-wiki5m_reconstruction_v2\0<PASSAGE_QID>\0context\0<NORMALIZED_FORM>
+wiki5m_reconstruction_v3\0<PASSAGE_QID>\0context\0<NORMALIZED_FORM>
 ```
 
 For each ranked form, rank its occurrences with the same digest plus the
@@ -467,20 +467,20 @@ Every resolved entity occurrence that is not masked receives exactly one marker
 block immediately after its unchanged surface text:
 
 ```text
-entity surface <|s_ent|> <|rel|> <|t_ent|>
+entity surface <|rel|> <|t_ent|>
 ```
 
 Examples:
 
 ```text
-Ilan Rao <|s_ent|> <|rel|> <|t_ent|>
-Northbridge University <|s_ent|> <|rel|> <|t_ent|>
+Ilan Rao <|rel|> <|t_ent|>
+Northbridge University <|rel|> <|t_ent|>
 ```
 
 Rules:
 
-- The entity surface comes before all three markers.
-- Marker order is exactly `s_ent`, `rel`, `t_ent`.
+- The entity surface comes before both markers.
+- Marker order is exactly `rel`, `t_ent`.
 - Markers are added after every visible resolved occurrence, including repeated
   occurrences of one QID.
 - Masked entity occurrences contain only their sentinel; no KG marker appears
@@ -540,7 +540,7 @@ within preprocessing schema v2.
 
 ```json
 {
-  "schema_version": "wiki5m_reconstruction_v2",
+  "schema_version": "wiki5m_reconstruction_v3",
   "example_id": "wiki5m:Q900",
   "passage": {
     "qid": "Q900",
@@ -674,8 +674,8 @@ occurrence is masked while the earlier occurrence remains visible.
 
 ```text
 [BLANK_0] was founded in 1998. [BLANK_1] joined [BLANK_2] after
-working with Ilan Rao <|s_ent|> <|rel|> <|t_ent|>. Northbridge University
-<|s_ent|> <|rel|> <|t_ent|> and Solace Foundation <|s_ent|> <|rel|> <|t_ent|>
+working with Ilan Rao <|rel|> <|t_ent|>. Northbridge University
+<|rel|> <|t_ent|> and Solace Foundation <|rel|> <|t_ent|>
 later funded [BLANK_3]. Its annual lecture became the city's best-known
 [BLANK_4].
 ```
@@ -736,7 +736,7 @@ No alias list is sent to the model or duplicated into every JSONL record.
 The implementation writes only under:
 
 ```text
-datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2/
+datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v3/
 ├── manifest.json
 └── shards/
     ├── entities-00000000-00009999.jsonl.gz
@@ -820,7 +820,7 @@ Public Python entry points:
 
 ```python
 preprocess_passage(store, passage_qid, config) -> PreprocessResult
-build_preprocessed_corpus(store, output_dir, config) -> Path
+build_preprocessed_corpus(store, output_dir, config, workers=...) -> Path
 render_example(record, passage_text) -> RenderedExample
 validate_preprocessed_record(record, passage_text, store) -> None
 ```
@@ -828,7 +828,7 @@ validate_preprocessed_record(record, passage_text, store) -> None
 CLI:
 
 ```text
-wikidata5m-preprocess build SOURCE_ROOT [--output ...] [--start-id ...] [--stop-id ...]
+wikidata5m-preprocess build SOURCE_ROOT [--output ...] [--start-id ...] [--stop-id ...] [--workers ...]
 wikidata5m-preprocess inspect INDEX_DIR --qid Q...
 wikidata5m-preprocess stats OUTPUT_DIR
 wikidata5m-preprocess validate OUTPUT_DIR [--full]
@@ -879,7 +879,7 @@ artifacts. It is the required review tool before a full build.
 
 ### Rendering and records
 
-- Visible surfaces are followed by exactly `s_ent`, `rel`, `t_ent`.
+- Visible surfaces are followed by exactly `rel`, `t_ent`.
 - Masked entity and context spans contain no KG markers.
 - Right-to-left edits preserve all original offsets.
 - Sentinels follow passage order and are unique.
@@ -906,7 +906,7 @@ artifacts. It is the required review tool before a full build.
 
 The tensor-level input document has been revised to:
 
-- show `entity surface <|s_ent|> <|rel|> <|t_ent|>` marker order;
+- show `entity surface <|rel|> <|t_ent|>` marker order;
 - state that every visible resolved occurrence is marked;
 - state that masked occurrences have no surrounding KG markers;
 - use ordinary `[BLANK_i]` text and the instruct chat template, with no

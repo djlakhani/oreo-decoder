@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26.0",
     "requests>=2.34.2",
     "torch>=2.14.0",
+    "tqdm>=4.67.0",
     "transformers>=5.17.0,<6",
 ]
 
@@ -19,6 +20,7 @@ dependencies = [
 wikidata5m-index = "oreo_qwen.wikidata5m.cli:main"
 wikidata5m-preprocess = "oreo_qwen.wikidata5m.preprocessing.cli:main"
 raw-qwen-eval = "oreo_qwen.raw_eval.cli:main"
+oreo-qwen-train = "oreo_qwen.training:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]

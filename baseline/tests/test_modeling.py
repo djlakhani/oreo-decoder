@@ -19,8 +19,8 @@ from oreo_qwen import (
 
 def make_config(
     *,
-    num_hidden_layers: int = 4,
-    kil_layer_boundaries: tuple[int, ...] = (1, 3),
+    num_hidden_layers: int = 2,
+    kil_layer_boundaries: tuple[int, ...] = (1,),
     output_kg_diagnostics: bool = False,
 ) -> OreoQwen3Config:
     return OreoQwen3Config(
@@ -36,16 +36,15 @@ def make_config(
         bos_token_id=1,
         eos_token_id=None,
         tie_word_embeddings=True,
-        num_entities=32,
         num_relations=2,
         kil_layer_boundaries=kil_layer_boundaries,
-        entity_embedding_dim=4,
-        relation_embedding_dim=6,
+        knowledge_embedding_dim=4,
+        adapter_bottleneck_dim=8,
         output_kg_diagnostics=output_kg_diagnostics,
     )
 
 
-def make_kg(*, num_steps: int = 2, supervision: bool = True) -> KGInputBatch:
+def make_kg(*, num_steps: int = 1, supervision: bool = True) -> KGInputBatch:
     optional: dict[str, torch.Tensor] = {
         "kg_initial_node_indices": torch.tensor([0, 3]),
     }
@@ -54,17 +53,26 @@ def make_kg(*, num_steps: int = 2, supervision: bool = True) -> KGInputBatch:
         for step in range(num_steps):
             relation_targets[step, :, step % 2] = 1.0
         optional.update(
-            kg_entity_link_targets=torch.tensor([0, 3]),
-            kg_entity_link_mask=torch.tensor([True, True]),
             kg_relation_targets=relation_targets,
             kg_relation_target_mask=torch.ones(num_steps, 2, dtype=torch.bool),
         )
     return KGInputBatch(
         kg_mention_batch=torch.tensor([0, 1]),
-        kg_src_positions=torch.tensor([0, 0]),
         kg_rel_positions=torch.tensor([2, 2]),
         kg_tgt_positions=torch.tensor([3, 3]),
-        kg_node_ids=torch.tensor([1, 2, 3, 4, 5, 6]),
+        kg_node_embeddings=torch.tensor(
+            [
+                [1.0, 0, 0, 0],
+                [0, 1.0, 0, 0],
+                [0, 0, 1.0, 0],
+                [1.0, 1.0, 0, 0],
+                [0, 1.0, 1.0, 0],
+                [0, 0, 1.0, 1.0],
+            ]
+        ),
+        kg_relation_embeddings=torch.tensor(
+            [[1.0, 0, 0, 0], [0, 1.0, 0, 0]]
+        ),
         kg_node_batch=torch.tensor([0, 0, 0, 1, 1, 1]),
         kg_edge_src=torch.tensor([0, 1, 3, 4]),
         kg_edge_dst=torch.tensor([1, 2, 4, 5]),
@@ -105,11 +113,11 @@ def make_tokenizer() -> PreTrainedTokenizerFast:
 
 
 class OreoQwen3ConfigTests(unittest.TestCase):
-    def test_qwen3_4b_depth_defaults_to_three_twelve_layer_groups(self) -> None:
-        config = make_config(num_hidden_layers=36, kil_layer_boundaries=(12, 24))
-        self.assertEqual(config.kil_layer_boundaries, [12, 24])
-        self.assertEqual(config.num_kil_steps, 2)
-        self.assertEqual(config.reasoner_config.num_kil_steps, 2)
+    def test_qwen3_4b_defaults_to_one_late_kil(self) -> None:
+        config = make_config(num_hidden_layers=36, kil_layer_boundaries=(34,))
+        self.assertEqual(config.kil_layer_boundaries, [34])
+        self.assertEqual(config.num_kil_steps, 1)
+        self.assertEqual(config.reasoner_config.num_kil_steps, 1)
 
         automatic = OreoQwen3Config(
             vocab_size=64,
@@ -120,7 +128,7 @@ class OreoQwen3ConfigTests(unittest.TestCase):
             num_key_value_heads=1,
             head_dim=8,
         )
-        self.assertEqual(automatic.kil_layer_boundaries, [12, 24])
+        self.assertEqual(automatic.kil_layer_boundaries, [34])
 
     def test_boundaries_are_completed_layer_counts(self) -> None:
         with self.assertRaisesRegex(ValueError, "strictly increasing"):
@@ -140,14 +148,13 @@ class OreoQwen3ConfigTests(unittest.TestCase):
         )
         config = OreoQwen3Config.from_qwen3_config(
             native,
-            num_entities=20,
             num_relations=5,
             kil_layer_boundaries=[1],
         )
         self.assertEqual(config.vocab_size, native.vocab_size)
         self.assertEqual(config.hidden_size, native.hidden_size)
         self.assertEqual(config.num_hidden_layers, native.num_hidden_layers)
-        self.assertEqual(config.num_entities, 20)
+        self.assertEqual(config.knowledge_embedding_dim, 384)
 
 
 class OreoQwen3ModelTests(unittest.TestCase):
@@ -158,7 +165,7 @@ class OreoQwen3ModelTests(unittest.TestCase):
         self.input_ids, self.attention_mask, self.labels = make_language_batch()
         self.kg = make_kg()
 
-    def test_two_kils_run_at_configured_boundaries(self) -> None:
+    def test_single_kil_runs_at_configured_boundary(self) -> None:
         events: list[str] = []
         hooks = []
         for index, layer in enumerate(self.model.model.layers):
@@ -205,11 +212,6 @@ class OreoQwen3ModelTests(unittest.TestCase):
                 "kil",
                 "post-kil",
                 "layer-2",
-                "layer-3",
-                "pre-kil",
-                "kil",
-                "post-kil",
-                "layer-4",
             ],
         )
 
@@ -225,19 +227,17 @@ class OreoQwen3ModelTests(unittest.TestCase):
 
         self.assertEqual(output.logits.shape, (2, 7, self.config.vocab_size))
         self.assertIsNotNone(output.lm_loss)
-        self.assertIsNotNone(output.entity_link_loss)
         self.assertIsNotNone(output.relation_loss)
         torch.testing.assert_close(
             output.loss,
-            output.lm_loss + output.entity_link_loss + output.relation_loss,
+            output.lm_loss + output.relation_loss,
         )
-        self.assertEqual(len(output.entity_states), 3)  # initial, one-hop, two-hop
-        self.assertEqual(len(output.relation_probs), 2)
+        self.assertEqual(len(output.entity_states), 2)  # initial, one-hop
+        self.assertEqual(len(output.relation_probs), 1)
         self.assertEqual(output.entity_states[-1].shape, (2, 6))
         self.assertEqual(output.relation_probs[-1].shape, (2, 2))
 
     def test_auxiliary_weights_control_total_loss(self) -> None:
-        self.model.config.entity_link_loss_weight = 0.25
         self.model.config.relation_loss_weight = 2.0
         output = self.model(
             input_ids=self.input_ids,
@@ -247,9 +247,7 @@ class OreoQwen3ModelTests(unittest.TestCase):
             **self.kg.as_model_kwargs(),
         )
         expected = (
-            output.lm_loss
-            + 0.25 * output.entity_link_loss
-            + 2.0 * output.relation_loss
+            output.lm_loss + 2.0 * output.relation_loss
         )
         torch.testing.assert_close(output.loss, expected)
 
@@ -265,11 +263,12 @@ class OreoQwen3ModelTests(unittest.TestCase):
         torch.testing.assert_close(output.loss, output.lm_loss)
         output.loss.backward()
         self.assertGreater(
-            self.model.model.reasoner.entity_memory.weight.grad.abs().sum().item(),
+            self.model.model.reasoner.steps[0]
+            .value_projection.projection.output.weight.grad.abs().sum().item(),
             0.0,
         )
 
-    def test_gradients_reach_qwen_reasoner_memories_and_marker_embeddings(self) -> None:
+    def test_gradients_cross_frozen_qwen_and_reach_oreo_modules(self) -> None:
         output = self.model(
             input_ids=self.input_ids,
             attention_mask=self.attention_mask,
@@ -279,13 +278,13 @@ class OreoQwen3ModelTests(unittest.TestCase):
         )
         output.loss.backward()
 
-        self.assertGreater(
-            self.model.model.layers[0].self_attn.q_proj.weight.grad.abs().sum().item(),
-            0.0,
+        self.assertIsNone(
+            self.model.model.layers[0].self_attn.q_proj.weight.grad
+        )
+        self.assertFalse(
+            self.model.model.layers[0].self_attn.q_proj.weight.requires_grad
         )
         reasoner = self.model.model.reasoner
-        self.assertGreater(reasoner.entity_memory.weight.grad.abs().sum().item(), 0.0)
-        self.assertGreater(reasoner.relation_memory.weight.grad.abs().sum().item(), 0.0)
         for step in reasoner.steps:
             self.assertGreater(
                 step.relation_router.query_projection.input.weight.grad.abs().sum().item(),
@@ -306,11 +305,62 @@ class OreoQwen3ModelTests(unittest.TestCase):
             self.assertIsNotNone(layer.gate.grad)
             self.assertGreater(layer.gate.grad.abs().item(), 0.0)
 
-        # Token 10 occupies a source-marker position and participates in the
-        # supervised entity-linking path.
-        self.assertGreater(
-            self.model.model.embed_tokens.weight.grad[10].abs().sum().item(),
-            0.0,
+        self.assertIsNone(self.model.model.embed_tokens.weight.grad)
+        self.assertIsNone(self.model.lm_head.weight.grad)
+
+    def test_only_oreo_parameters_are_optimizer_visible(self) -> None:
+        trainable = {
+            name for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        }
+        allowed = (
+            "model.reasoner.",
+            "model.pre_kil_layers.",
+            "model.post_kil_layers.",
+        )
+        self.assertTrue(trainable)
+        self.assertTrue(
+            all(
+                name == "model.oreo_token_deltas" or name.startswith(allowed)
+                for name in trainable
+            )
+        )
+        self.assertEqual(
+            {name for name, _ in self.model.oreo_named_parameters()},
+            trainable,
+        )
+        self.assertEqual(
+            {id(parameter) for parameter in self.model.oreo_parameters()},
+            {
+                id(parameter)
+                for parameter in self.model.parameters()
+                if parameter.requires_grad
+            },
+        )
+        self.assertFalse(self.model.model.embed_tokens.weight.requires_grad)
+        self.assertFalse(self.model.model.norm.weight.requires_grad)
+        self.assertFalse(self.model.lm_head.weight.requires_grad)
+
+    def test_gradient_checkpointing_preserves_frozen_backbone_flow(self) -> None:
+        self.model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        output = self.model(
+            input_ids=self.input_ids,
+            attention_mask=self.attention_mask,
+            labels=self.labels,
+            use_cache=False,
+            **self.kg.as_model_kwargs(),
+        )
+        output.loss.backward()
+        gradient = (
+            self.model.model.reasoner.steps[0]
+            .relation_router.query_projection.output.weight.grad
+        )
+        self.assertIsNotNone(gradient)
+        self.assertGreater(gradient.abs().sum().item(), 0.0)
+        self.assertIsNone(
+            self.model.model.layers[-1].self_attn.q_proj.weight.grad
         )
 
     def test_graph_free_path_matches_native_qwen(self) -> None:
@@ -329,9 +379,9 @@ class OreoQwen3ModelTests(unittest.TestCase):
         )
         oreo_config = OreoQwen3Config.from_qwen3_config(
             native_config,
-            num_entities=8,
             num_relations=2,
-            entity_embedding_dim=4,
+            knowledge_embedding_dim=4,
+            adapter_bottleneck_dim=8,
             kil_layer_boundaries=[1],
         )
         native = Qwen3ForCausalLM(native_config).eval()
@@ -339,6 +389,7 @@ class OreoQwen3ModelTests(unittest.TestCase):
         incompatible = oreo.load_state_dict(native.state_dict(), strict=False)
         self.assertFalse(incompatible.unexpected_keys)
         new_module_prefixes = (
+            "model.oreo_token_deltas",
             "model.reasoner.",
             "model.pre_kil_layers.",
             "model.post_kil_layers.",
@@ -372,9 +423,9 @@ class OreoQwen3ModelTests(unittest.TestCase):
             oreo = OreoQwen3ForCausalLM.from_qwen3_pretrained(
                 directory,
                 oreo_config_overrides={
-                    "num_entities": 8,
                     "num_relations": 2,
-                    "entity_embedding_dim": 4,
+                    "knowledge_embedding_dim": 4,
+                    "adapter_bottleneck_dim": 8,
                     "kil_layer_boundaries": [1],
                 },
             ).eval()
@@ -383,13 +434,16 @@ class OreoQwen3ModelTests(unittest.TestCase):
             native_logits = native(self.input_ids, use_cache=False).logits
             oreo_logits = oreo(self.input_ids, use_cache=False).logits
         torch.testing.assert_close(oreo_logits, native_logits, atol=0, rtol=0)
-        self.assertEqual(oreo.model.reasoner.entity_memory.weight.shape, (8, 4))
+        self.assertEqual(
+            oreo.model.reasoner.steps[0].value_projection.projection.input.in_features,
+            4,
+        )
 
     def test_partial_flat_graph_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "partial KG batch"):
             self.model(
                 input_ids=self.input_ids,
-                kg_node_ids=self.kg.kg_node_ids,
+                kg_node_embeddings=self.kg.kg_node_embeddings,
             )
 
     def test_output_hidden_states_and_cache_follow_hugging_face_api(self) -> None:
@@ -427,7 +481,7 @@ class OreoQwen3ModelTests(unittest.TestCase):
                 )
 
         self.assertIsInstance(restored.config, OreoQwen3Config)
-        self.assertEqual(restored.config.kil_layer_boundaries, [1, 3])
+        self.assertEqual(restored.config.kil_layer_boundaries, [1])
         torch.testing.assert_close(actual.logits, expected.logits)
         torch.testing.assert_close(actual.entity_states[-1], expected.entity_states[-1])
         torch.testing.assert_close(actual.relation_probs[-1], expected.relation_probs[-1])
@@ -466,14 +520,17 @@ class OreoQwen3ModelTests(unittest.TestCase):
                 num_attention_heads=2,
                 num_key_value_heads=1,
                 head_dim=8,
-                num_entities=8,
                 num_relations=2,
                 kil_layer_boundaries=[1],
-                entity_embedding_dim=4,
+                knowledge_embedding_dim=4,
+                adapter_bottleneck_dim=8,
                 tie_word_embeddings=True,
             )
         )
         token_ids = register_oreo_tokens_and_resize(model, tokenizer)
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
 
         self.assertEqual(model.model.embed_tokens.num_embeddings, len(tokenizer))
         self.assertEqual(model.lm_head.out_features, len(tokenizer))
@@ -483,7 +540,6 @@ class OreoQwen3ModelTests(unittest.TestCase):
 
         input_ids = torch.tensor(
             [[
-                token_ids.source_entity,
                 2,
                 token_ids.relation,
                 token_ids.target_entity,
@@ -493,23 +549,26 @@ class OreoQwen3ModelTests(unittest.TestCase):
             ]]
         )
         labels = input_ids.clone()
-        labels[:, :4] = -100
+        labels[:, :3] = -100
         kg = KGInputBatch(
             kg_mention_batch=torch.tensor([0]),
-            kg_src_positions=torch.tensor([0]),
-            kg_rel_positions=torch.tensor([2]),
-            kg_tgt_positions=torch.tensor([3]),
-            kg_node_ids=torch.tensor([1, 2]),
+            kg_rel_positions=torch.tensor([1]),
+            kg_tgt_positions=torch.tensor([2]),
+            kg_node_embeddings=torch.randn(2, 4),
+            kg_relation_embeddings=torch.randn(2, 4),
             kg_node_batch=torch.tensor([0, 0]),
             kg_edge_src=torch.tensor([0]),
             kg_edge_dst=torch.tensor([1]),
             kg_edge_type=torch.tensor([0]),
             kg_initial_node_indices=torch.tensor([0]),
-            kg_entity_link_targets=torch.tensor([0]),
-            kg_entity_link_mask=torch.tensor([True]),
             kg_relation_targets=torch.tensor([[[1.0, 0.0]]]),
             kg_relation_target_mask=torch.tensor([[True]]),
         )
+        frozen_before = (
+            model.model.layers[0].self_attn.q_proj.weight.detach().clone()
+        )
+        delta_before = model.model.oreo_token_deltas.detach().clone()
+        optimizer = torch.optim.SGD(model.oreo_parameters(), lr=0.1)
         output = model(
             input_ids=input_ids,
             attention_mask=torch.ones_like(input_ids),
@@ -519,15 +578,26 @@ class OreoQwen3ModelTests(unittest.TestCase):
         )
         output.loss.backward()
         self.assertGreater(
-            model.model.embed_tokens.weight.grad[token_ids.source_entity]
-            .abs()
-            .sum()
-            .item(),
+            model.model.oreo_token_deltas.grad[0].abs().sum().item(),
             0.0,
         )
+        self.assertIsNone(model.model.embed_tokens.weight.grad)
+        self.assertIsNone(model.lm_head.weight.grad)
+        self.assertFalse(model.model.embed_tokens.weight.requires_grad)
+        self.assertFalse(model.lm_head.weight.requires_grad)
+        optimizer.step()
+        torch.testing.assert_close(
+            model.model.layers[0].self_attn.q_proj.weight,
+            frozen_before,
+            atol=0,
+            rtol=0,
+        )
+        self.assertFalse(
+            torch.equal(model.model.oreo_token_deltas.detach(), delta_before)
+        )
 
-    def test_native_checkpoint_factory_requires_kg_vocabulary_sizes(self) -> None:
-        with self.assertRaisesRegex(ValueError, "num_entities"):
+    def test_native_checkpoint_factory_requires_relation_vocabulary_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "num_relations"):
             OreoQwen3ForCausalLM.from_qwen3_pretrained(
                 "unused",
                 oreo_config_overrides={},
@@ -551,10 +621,7 @@ class OreoQwen3ModelTests(unittest.TestCase):
         )
         token_ids = register_oreo_tokens_and_resize(native, tokenizer)
         self.assertEqual(native.model.embed_tokens.num_embeddings, len(tokenizer))
-        self.assertEqual(
-            native.config.oreo_source_entity_token_id,
-            token_ids.source_entity,
-        )
+        self.assertEqual(native.config.oreo_relation_token_id, token_ids.relation)
 
 
 if __name__ == "__main__":

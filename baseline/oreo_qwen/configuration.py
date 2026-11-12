@@ -23,16 +23,14 @@ class OreoQwen3Config(Qwen3Config):
     def __init__(
         self,
         *,
-        num_entities: int = 1,
         num_relations: int = 1,
         kil_layer_boundaries: list[int] | tuple[int, ...] | None = None,
-        entity_embedding_dim: int = 128,
-        relation_embedding_dim: int | None = None,
-        entity_link_loss_weight: float = 1.0,
+        knowledge_embedding_dim: int = 384,
+        adapter_bottleneck_dim: int = 512,
+        knowledge_embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B",
         relation_loss_weight: float = 1.0,
         output_kg_diagnostics: bool = False,
         validate_kg_inputs: bool = True,
-        oreo_source_entity_token_id: int | None = None,
         oreo_relation_token_id: int | None = None,
         oreo_target_entity_token_id: int | None = None,
         **kwargs: Any,
@@ -44,17 +42,15 @@ class OreoQwen3Config(Qwen3Config):
                 self.num_hidden_layers
             )
 
-        self.num_entities = num_entities
         self.num_relations = num_relations
         self.kil_layer_boundaries = list(kil_layer_boundaries)
-        self.entity_embedding_dim = entity_embedding_dim
-        self.relation_embedding_dim = relation_embedding_dim
-        self.entity_link_loss_weight = entity_link_loss_weight
+        self.knowledge_embedding_dim = knowledge_embedding_dim
+        self.adapter_bottleneck_dim = adapter_bottleneck_dim
+        self.knowledge_embedding_model_name = knowledge_embedding_model_name
         self.relation_loss_weight = relation_loss_weight
         self.output_kg_diagnostics = output_kg_diagnostics
         self.validate_kg_inputs = validate_kg_inputs
 
-        self.oreo_source_entity_token_id = oreo_source_entity_token_id
         self.oreo_relation_token_id = oreo_relation_token_id
         self.oreo_target_entity_token_id = oreo_target_entity_token_id
 
@@ -63,8 +59,9 @@ class OreoQwen3Config(Qwen3Config):
     @staticmethod
     def _default_kil_boundaries(num_hidden_layers: int) -> tuple[int, ...]:
         if num_hidden_layers == 36:
-            # Qwen3-4B: divide the decoder into three equal 12-layer groups.
-            return (12, 24)
+            # One late KIL, leaving the final two Qwen3-4B decoder blocks to
+            # integrate the knowledge written to and broadcast from T_ENT.
+            return (34,)
         if num_hidden_layers < 2:
             raise ValueError(
                 "Oreo-Qwen requires at least two decoder layers so a KIL can "
@@ -72,20 +69,23 @@ class OreoQwen3Config(Qwen3Config):
             )
         if num_hidden_layers == 2:
             return (1,)
-        first = max(1, num_hidden_layers // 3)
-        second = min(num_hidden_layers - 1, (2 * num_hidden_layers) // 3)
-        return (first,) if first == second else (first, second)
+        return (max(1, num_hidden_layers - 2),)
 
     def _validate_oreo_fields(self) -> None:
-        for name in ("num_entities", "num_relations", "entity_embedding_dim"):
+        for name in (
+            "num_relations",
+            "knowledge_embedding_dim",
+            "adapter_bottleneck_dim",
+        ):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}.")
 
-        if self.relation_embedding_dim is not None:
-            value = self.relation_embedding_dim
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError("relation_embedding_dim must be a positive integer.")
+        if (
+            not isinstance(self.knowledge_embedding_model_name, str)
+            or not self.knowledge_embedding_model_name
+        ):
+            raise ValueError("knowledge_embedding_model_name must be a nonempty string.")
 
         boundaries = self.kil_layer_boundaries
         if not boundaries:
@@ -99,7 +99,7 @@ class OreoQwen3Config(Qwen3Config):
                 "KIL boundaries must lie between 1 and num_hidden_layers - 1."
             )
 
-        for name in ("entity_link_loss_weight", "relation_loss_weight"):
+        for name in ("relation_loss_weight",):
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative number.")
@@ -110,7 +110,6 @@ class OreoQwen3Config(Qwen3Config):
             raise ValueError("validate_kg_inputs must be a bool.")
 
         token_fields = (
-            self.oreo_source_entity_token_id,
             self.oreo_relation_token_id,
             self.oreo_target_entity_token_id,
         )
@@ -135,11 +134,10 @@ class OreoQwen3Config(Qwen3Config):
     def reasoner_config(self) -> KGReasonerConfig:
         return KGReasonerConfig(
             hidden_size=self.hidden_size,
-            num_entities=self.num_entities,
             num_relations=self.num_relations,
             num_kil_steps=self.num_kil_steps,
-            entity_embedding_dim=self.entity_embedding_dim,
-            relation_embedding_dim=self.relation_embedding_dim,
+            knowledge_embedding_dim=self.knowledge_embedding_dim,
+            adapter_bottleneck_dim=self.adapter_bottleneck_dim,
             rms_norm_eps=self.rms_norm_eps,
             initializer_range=self.initializer_range,
         )
@@ -147,7 +145,6 @@ class OreoQwen3Config(Qwen3Config):
     @property
     def oreo_special_token_ids(self) -> OreoSpecialTokenIds | None:
         fields = (
-            self.oreo_source_entity_token_id,
             self.oreo_relation_token_id,
             self.oreo_target_entity_token_id,
         )
@@ -156,7 +153,6 @@ class OreoQwen3Config(Qwen3Config):
         if any(value is None for value in fields):
             raise ValueError("Oreo special-token IDs are only partially configured.")
         return OreoSpecialTokenIds(
-            source_entity=self.oreo_source_entity_token_id,
             relation=self.oreo_relation_token_id,
             target_entity=self.oreo_target_entity_token_id,
         )

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .schema import PreprocessedRecord, RenderedExample, passage_sha256
 
-KG_MARKERS = " <|s_ent|> <|rel|> <|t_ent|>"
+KG_MARKERS = " <|rel|> <|t_ent|>"
 
 
 @dataclass(frozen=True, slots=True)

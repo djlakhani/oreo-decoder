@@ -7,8 +7,9 @@ import json
 import os
 import tempfile
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from ..errors import MissingDataError
 from ..store import Wikidata5MStore
@@ -519,6 +520,213 @@ def _aggregate_statistics(entries: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _build_shard_entry(
+    store: Wikidata5MStore,
+    output: Path,
+    config: PreprocessConfig,
+    shard_start: int,
+    shard_stop: int,
+) -> dict[str, Any]:
+    """Build one independent dense-ID shard for serial or process workers."""
+
+    shard_dir = output / "shards"
+    name = f"entities-{shard_start:08d}-{shard_stop - 1:08d}.jsonl.gz"
+    destination = shard_dir / name
+    records: list[PreprocessedRecord] = []
+    rejections: Counter[str] = Counter()
+    rejection_samples: list[dict[str, str]] = []
+    primary_degrees: list[int] = []
+    nested_degrees: list[int] = []
+    diagnostics: Counter[str] = Counter()
+    for entity_id in range(shard_start, shard_stop):
+        qid = store.entity_qid(entity_id)
+        if store.passage(qid) is None:
+            rejections["missing_passage"] += 1
+            if len(rejection_samples) < config.audit_example_limit:
+                rejection_samples.append({"qid": qid, "reason": "missing_passage"})
+            continue
+        result = preprocess_passage(store, qid, config)
+        if "primary_raw_incoming_degree" in result.diagnostics:
+            primary_degrees.append(int(result.diagnostics["primary_raw_incoming_degree"]))
+        nested_degrees.extend(
+            int(item) for item in result.inspection.get("nested_degrees", [])
+        )
+        diagnostics.update(result.diagnostics)
+        if result.record is None:
+            assert result.rejection_reason is not None
+            rejections[result.rejection_reason] += 1
+            if len(rejection_samples) < config.audit_example_limit:
+                rejection_samples.append(
+                    {"qid": qid, "reason": result.rejection_reason}
+                )
+        else:
+            records.append(result.record)
+
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{name}.", suffix=".tmp", dir=shard_dir, delete=False
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        record_count, checksum = _write_gzip_jsonl(temporary_path, records)
+        _validate_temporary_shard(temporary_path, record_count)
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return {
+        "path": str(destination.relative_to(output)),
+        "start_entity_id": shard_start,
+        "stop_entity_id": shard_stop,
+        "records": record_count,
+        "rejections": dict(sorted(rejections.items())),
+        "rejection_samples": rejection_samples,
+        "mask_kind_counts": dict(
+            sorted(
+                Counter(
+                    occurrence.kind
+                    for record in records
+                    for occurrence in record.masked_occurrences
+                ).items()
+            )
+        ),
+        "statistics": _shard_statistics(
+            records,
+            inspected=shard_stop - shard_start,
+            primary_degrees=primary_degrees,
+            nested_degrees=nested_degrees,
+            diagnostics=diagnostics,
+        ),
+        "size": destination.stat().st_size,
+        "sha256": checksum,
+    }
+
+
+def _build_shard_worker(
+    index_dir: str,
+    source_root: str,
+    output: str,
+    config_values: Mapping[str, Any],
+    shard_start: int,
+    shard_stop: int,
+) -> dict[str, Any]:
+    config = PreprocessConfig(**config_values)
+    with Wikidata5MStore(
+        index_dir, source_root=source_root, validate=False
+    ) as worker_store:
+        return _build_shard_entry(
+            worker_store, Path(output), config, shard_start, shard_stop
+        )
+
+
+def _ordered_corpus_totals(
+    entries_by_range: Mapping[tuple[int, int], dict[str, Any]],
+    audit_limit: int,
+) -> tuple[list[dict[str, Any]], int, dict[str, int], list[dict[str, Any]]]:
+    entries = [entries_by_range[key] for key in sorted(entries_by_range)]
+    rejections: Counter[str] = Counter()
+    samples: list[dict[str, Any]] = []
+    for entry in entries:
+        rejections.update(entry.get("rejections", {}))
+        samples.extend(entry.get("rejection_samples", []))
+    return (
+        entries,
+        sum(int(entry["records"]) for entry in entries),
+        dict(sorted(rejections.items())),
+        samples[:audit_limit],
+    )
+
+
+def _build_preprocessed_corpus_parallel(
+    *,
+    store: Wikidata5MStore,
+    output: Path,
+    config: PreprocessConfig,
+    start_entity_id: int,
+    stop_entity_id: int,
+    workers: int,
+    force: bool,
+    base_manifest: Mapping[str, Any],
+    previous_shards: Mapping[tuple[int, int], dict[str, Any]],
+    progress_callback: Callable[[int, int, int], None] | None,
+) -> Path:
+    entries_by_range: dict[tuple[int, int], dict[str, Any]] = {}
+    pending: list[tuple[int, int]] = []
+    for shard_start in range(start_entity_id, stop_entity_id, config.shard_entity_count):
+        shard_stop = min(shard_start + config.shard_entity_count, stop_entity_id)
+        key = (shard_start, shard_stop)
+        destination = output / "shards" / (
+            f"entities-{shard_start:08d}-{shard_stop - 1:08d}.jsonl.gz"
+        )
+        previous = None if force else previous_shards.get(key)
+        if previous is not None and destination.is_file() and (
+            destination.stat().st_size == previous.get("size")
+            and file_sha256(destination) == previous.get("sha256")
+        ):
+            entries_by_range[key] = previous
+        else:
+            pending.append(key)
+
+    progress_path = output / ".build-manifest.json"
+    total_entities = stop_entity_id - start_entity_id
+
+    def publish() -> None:
+        entries, records, rejections, samples = _ordered_corpus_totals(
+            entries_by_range, config.audit_example_limit
+        )
+        inspected = sum(stop - start for start, stop in entries_by_range)
+        progress = {
+            **base_manifest,
+            "complete": False,
+            "records": records,
+            "rejections": rejections,
+            "rejection_samples": samples,
+            "statistics": _aggregate_statistics(entries),
+            "shards": entries,
+        }
+        temporary_progress = output / ".build-manifest.json.tmp"
+        temporary_progress.write_bytes(_json_bytes(progress))
+        os.replace(temporary_progress, progress_path)
+        if progress_callback is not None:
+            progress_callback(inspected, total_entities, records)
+
+    if entries_by_range:
+        publish()
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _build_shard_worker,
+                str(store.index_dir),
+                str(store.source_root),
+                str(output),
+                config.to_dict(),
+                shard_start,
+                shard_stop,
+            ): (shard_start, shard_stop)
+            for shard_start, shard_stop in pending
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            entries_by_range[key] = future.result()
+            publish()
+
+    entries, records, rejections, samples = _ordered_corpus_totals(
+        entries_by_range, config.audit_example_limit
+    )
+    manifest = {
+        **base_manifest,
+        "complete": True,
+        "records": records,
+        "rejections": rejections,
+        "rejection_samples": samples,
+        "statistics": _aggregate_statistics(entries),
+        "shards": entries,
+    }
+    temporary_manifest = output / ".manifest.json.tmp"
+    temporary_manifest.write_bytes(_json_bytes(manifest))
+    os.replace(temporary_manifest, output / "manifest.json")
+    progress_path.unlink(missing_ok=True)
+    return output
+
+
 def build_preprocessed_corpus(
     store: Wikidata5MStore,
     output_dir: str | Path,
@@ -527,6 +735,8 @@ def build_preprocessed_corpus(
     start_entity_id: int = 0,
     stop_entity_id: int | None = None,
     force: bool = False,
+    workers: int = 1,
+    progress_callback: Callable[[int, int, int], None] | None = None,
 ) -> Path:
     """Build fixed dense-ID-range shards and a resumable corpus manifest."""
 
@@ -535,6 +745,8 @@ def build_preprocessed_corpus(
     stop = store.entity_count if stop_entity_id is None else stop_entity_id
     if not 0 <= start_entity_id <= stop <= store.entity_count:
         raise ValueError("invalid dense entity-ID range")
+    if workers <= 0:
+        raise ValueError("workers must be positive")
     output.mkdir(parents=True, exist_ok=True)
     shard_dir = output / "shards"
     shard_dir.mkdir(exist_ok=True)
@@ -574,6 +786,20 @@ def build_preprocessed_corpus(
         for item in ([] if existing is None else existing.get("shards", []))
     }
 
+    if workers > 1:
+        return _build_preprocessed_corpus_parallel(
+            store=store,
+            output=output,
+            config=config,
+            start_entity_id=start_entity_id,
+            stop_entity_id=stop,
+            workers=workers,
+            force=force,
+            base_manifest=base_manifest,
+            previous_shards=previous_shards,
+            progress_callback=progress_callback,
+        )
+
     shard_entries: list[dict[str, Any]] = []
     total_rejections: Counter[str] = Counter()
     total_records = 0
@@ -591,6 +817,12 @@ def build_preprocessed_corpus(
             total_records += int(previous["records"])
             total_rejections.update(previous.get("rejections", {}))
             rejection_samples.extend(previous.get("rejection_samples", []))
+            if progress_callback is not None:
+                progress_callback(
+                    shard_stop - start_entity_id,
+                    stop - start_entity_id,
+                    total_records,
+                )
             continue
         records: list[PreprocessedRecord] = []
         rejections: Counter[str] = Counter()
@@ -673,6 +905,12 @@ def build_preprocessed_corpus(
         temporary_progress = output / ".build-manifest.json.tmp"
         temporary_progress.write_bytes(_json_bytes(progress))
         os.replace(temporary_progress, progress_path)
+        if progress_callback is not None:
+            progress_callback(
+                shard_stop - start_entity_id,
+                stop - start_entity_id,
+                total_records,
+            )
 
     manifest = {
         **base_manifest,

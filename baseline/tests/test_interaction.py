@@ -18,10 +18,10 @@ from oreo_qwen.reasoner import KGReasonerConfig
 def make_configs(*, attention_bias: bool = False) -> tuple[KGReasonerConfig, Qwen3Config]:
     reasoner = KGReasonerConfig(
         hidden_size=16,
-        num_entities=8,
         num_relations=2,
         num_kil_steps=1,
-        entity_embedding_dim=4,
+        knowledge_embedding_dim=4,
+        adapter_bottleneck_dim=8,
     )
     qwen = Qwen3Config(
         vocab_size=32,
@@ -40,10 +40,10 @@ def make_configs(*, attention_bias: bool = False) -> tuple[KGReasonerConfig, Qwe
 def make_kg() -> KGInputBatch:
     return KGInputBatch(
         kg_mention_batch=torch.tensor([0]),
-        kg_src_positions=torch.tensor([1]),
         kg_rel_positions=torch.tensor([2]),
         kg_tgt_positions=torch.tensor([3]),
-        kg_node_ids=torch.tensor([0, 1]),
+        kg_node_embeddings=torch.randn(2, 4),
+        kg_relation_embeddings=torch.randn(2, 4),
         kg_node_batch=torch.tensor([0, 0]),
         kg_edge_src=torch.tensor([0]),
         kg_edge_dst=torch.tensor([1]),
@@ -66,8 +66,8 @@ class MarkerContextualizationLayerTests(unittest.TestCase):
 
     def test_only_markers_are_updated_and_answer_is_not_visible(self) -> None:
         output = self.layer(self.hidden, self.kg, self.prompt_mask)
-        marker_positions = torch.tensor([1, 2, 3])
-        nonmarker_positions = torch.tensor([0, 4, 5])
+        marker_positions = torch.tensor([2, 3])
+        nonmarker_positions = torch.tensor([0, 1, 4, 5])
 
         torch.testing.assert_close(
             output[:, nonmarker_positions],
@@ -100,7 +100,7 @@ class MarkerContextualizationLayerTests(unittest.TestCase):
         changed_output = self.layer(changed_prompt, self.kg, self.prompt_mask)
 
         self.assertGreater(
-            (changed_output[:, 1:4] - output[:, 1:4]).abs().sum().item(),
+            (changed_output[:, 2:4] - output[:, 2:4]).abs().sum().item(),
             0.0,
         )
 
@@ -188,10 +188,10 @@ class CausalTentBroadcastLayerTests(unittest.TestCase):
 
         two_tent_kg = KGInputBatch(
             kg_mention_batch=torch.tensor([0, 0]),
-            kg_src_positions=torch.tensor([0, 0]),
             kg_rel_positions=torch.tensor([0, 2]),
             kg_tgt_positions=torch.tensor([1, 3]),
-            kg_node_ids=torch.tensor([0, 1]),
+            kg_node_embeddings=torch.randn(2, 4),
+            kg_relation_embeddings=torch.randn(2, 4),
             kg_node_batch=torch.tensor([0, 0]),
             kg_edge_src=torch.tensor([0]),
             kg_edge_dst=torch.tensor([1]),

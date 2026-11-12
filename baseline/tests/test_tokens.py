@@ -41,10 +41,10 @@ class SpecialTokenTests(unittest.TestCase):
 
         token_ids = register_oreo_special_tokens(tokenizer)
 
-        self.assertEqual(len(OREO_SPECIAL_TOKENS), 3)
-        self.assertEqual(len(token_ids.all_ids), 3)
-        self.assertEqual(len(set(token_ids.all_ids)), 3)
-        self.assertEqual(len(tokenizer), original_size + 3)
+        self.assertEqual(len(OREO_SPECIAL_TOKENS), 2)
+        self.assertEqual(len(token_ids.all_ids), 2)
+        self.assertEqual(len(set(token_ids.all_ids)), 2)
+        self.assertEqual(len(tokenizer), original_size + 2)
         self.assertIn("<|existing|>", tokenizer.all_special_tokens)
 
         for token, token_id in zip(OREO_SPECIAL_TOKENS, token_ids.all_ids):
@@ -52,23 +52,21 @@ class SpecialTokenTests(unittest.TestCase):
 
         second_ids = register_oreo_special_tokens(tokenizer)
         self.assertEqual(second_ids, token_ids)
-        self.assertEqual(len(tokenizer), original_size + 3)
+        self.assertEqual(len(tokenizer), original_size + 2)
 
     def test_config_mapping_is_json_serializable(self) -> None:
         token_ids = register_oreo_special_tokens(make_tokenizer())
         config = token_ids.as_config_dict()
 
-        self.assertEqual(config["oreo_source_entity_token_id"], token_ids.source_entity)
         self.assertEqual(config["oreo_relation_token_id"], token_ids.relation)
         self.assertEqual(config["oreo_target_entity_token_id"], token_ids.target_entity)
-        self.assertEqual(len(config), 3)
+        self.assertEqual(len(config), 2)
 
     def test_duplicate_ids_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "distinct"):
             OreoSpecialTokenIds(
-                source_entity=1,
                 relation=1,
-                target_entity=2,
+                target_entity=1,
             )
 
 

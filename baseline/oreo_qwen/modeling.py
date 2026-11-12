@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -39,9 +40,7 @@ from .tokens import OreoSpecialTokenIds, register_oreo_special_tokens
 class OreoBaseModelOutputWithPast(BaseModelOutputWithPast):
     """Qwen backbone outputs plus losses and optional KIL diagnostics."""
 
-    entity_link_loss: Tensor | None = None
     relation_loss: Tensor | None = None
-    entity_link_logits: Tensor | None = None
     entity_states: tuple[Tensor, ...] | None = None
     relation_probs: tuple[Tensor, ...] | None = None
 
@@ -51,9 +50,7 @@ class OreoCausalLMOutputWithPast(CausalLMOutputWithPast):
     """Causal-LM outputs with each objective exposed separately."""
 
     lm_loss: Tensor | None = None
-    entity_link_loss: Tensor | None = None
     relation_loss: Tensor | None = None
-    entity_link_logits: Tensor | None = None
     entity_states: tuple[Tensor, ...] | None = None
     relation_probs: tuple[Tensor, ...] | None = None
 
@@ -65,6 +62,12 @@ class OreoQwen3Model(Qwen3Model):
 
     def __init__(self, config: OreoQwen3Config) -> None:
         super().__init__(config)
+        # The native vocabulary table remains frozen. These two rows are the
+        # only trainable input-token parameters and are applied additively when
+        # configured REL/T_ENT IDs occur in input_ids.
+        self.oreo_token_deltas = nn.Parameter(
+            torch.zeros(2, config.hidden_size)
+        )
         reasoner_config = config.reasoner_config
         self.reasoner = KGReasoner(reasoner_config)
         self.pre_kil_layers = nn.ModuleList(
@@ -95,18 +98,16 @@ class OreoQwen3Model(Qwen3Model):
         output_kg_diagnostics: bool | None = None,
         assistant_content_start_positions: Tensor | None = None,
         kg_mention_batch: Tensor | None = None,
-        kg_src_positions: Tensor | None = None,
         kg_rel_positions: Tensor | None = None,
         kg_tgt_positions: Tensor | None = None,
-        kg_node_ids: Tensor | None = None,
+        kg_node_embeddings: Tensor | None = None,
+        kg_relation_embeddings: Tensor | None = None,
         kg_node_batch: Tensor | None = None,
         kg_edge_src: Tensor | None = None,
         kg_edge_dst: Tensor | None = None,
         kg_edge_type: Tensor | None = None,
         kg_initial_node_indices: Tensor | None = None,
         kg_initial_entity_probs: Tensor | None = None,
-        kg_entity_link_targets: Tensor | None = None,
-        kg_entity_link_mask: Tensor | None = None,
         kg_relation_targets: Tensor | None = None,
         kg_relation_target_mask: Tensor | None = None,
         **kwargs: Any,
@@ -116,18 +117,16 @@ class OreoQwen3Model(Qwen3Model):
 
         kg = _build_kg_input(
             kg_mention_batch=kg_mention_batch,
-            kg_src_positions=kg_src_positions,
             kg_rel_positions=kg_rel_positions,
             kg_tgt_positions=kg_tgt_positions,
-            kg_node_ids=kg_node_ids,
+            kg_node_embeddings=kg_node_embeddings,
+            kg_relation_embeddings=kg_relation_embeddings,
             kg_node_batch=kg_node_batch,
             kg_edge_src=kg_edge_src,
             kg_edge_dst=kg_edge_dst,
             kg_edge_type=kg_edge_type,
             kg_initial_node_indices=kg_initial_node_indices,
             kg_initial_entity_probs=kg_initial_entity_probs,
-            kg_entity_link_targets=kg_entity_link_targets,
-            kg_entity_link_mask=kg_entity_link_mask,
             kg_relation_targets=kg_relation_targets,
             kg_relation_target_mask=kg_relation_target_mask,
         )
@@ -158,6 +157,7 @@ class OreoQwen3Model(Qwen3Model):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self._apply_oreo_token_deltas(input_ids, inputs_embeds)
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
@@ -210,7 +210,6 @@ class OreoQwen3Model(Qwen3Model):
             else output_kg_diagnostics
         )
 
-        initialization = None
         reasoner_state = None
         relation_losses: list[Tensor] = []
         entity_states: list[Tensor] = []
@@ -244,9 +243,8 @@ class OreoQwen3Model(Qwen3Model):
                         kg,
                         prompt_mask,
                     )
-                    if initialization is None:
-                        initialization = self.reasoner.initialize(hidden_states, kg)
-                        reasoner_state = initialization.state
+                    if reasoner_state is None:
+                        reasoner_state = self.reasoner.initialize(hidden_states, kg)
                         if diagnostics_enabled:
                             entity_states.append(reasoner_state.entity_probs)
 
@@ -279,15 +277,7 @@ class OreoQwen3Model(Qwen3Model):
         return OreoBaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
-            entity_link_loss=(
-                initialization.entity_link_loss
-                if initialization is not None
-                else None
-            ),
             relation_loss=relation_loss,
-            entity_link_logits=(
-                initialization.entity_logits if initialization is not None else None
-            ),
             entity_states=tuple(entity_states) if diagnostics_enabled and run_kg else None,
             relation_probs=(
                 tuple(relation_probabilities)
@@ -295,6 +285,21 @@ class OreoQwen3Model(Qwen3Model):
                 else None
             ),
         )
+
+    def _apply_oreo_token_deltas(
+        self, input_ids: Tensor, inputs_embeds: Tensor
+    ) -> Tensor:
+        token_ids = self.config.oreo_special_token_ids
+        if token_ids is None:
+            return inputs_embeds
+        result = inputs_embeds.clone()
+        for delta_index, token_id in enumerate(token_ids.all_ids):
+            mask = input_ids == token_id
+            if torch.any(mask):
+                result[mask] = result[mask] + self.oreo_token_deltas[delta_index].to(
+                    dtype=result.dtype
+                )
+        return result
 
 
 class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
@@ -312,6 +317,37 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
+        self.freeze_qwen_backbone()
+
+    def freeze_qwen_backbone(self) -> "OreoQwen3ForCausalLM":
+        """Freeze native Qwen and expose only Oreo parameters to optimizers.
+
+        Frozen decoder layers remain in autograd whenever their input depends
+        on an Oreo parameter. This permits gradients to pass through Qwen to
+        the adapters and marker deltas without allocating Qwen parameter
+        gradients or optimizer state.
+        """
+
+        self.requires_grad_(False)
+        self.model.oreo_token_deltas.requires_grad_(True)
+        self.model.reasoner.requires_grad_(True)
+        self.model.pre_kil_layers.requires_grad_(True)
+        self.model.post_kil_layers.requires_grad_(True)
+        return self
+
+    def oreo_named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]:
+        """Iterate over exactly the parameters intended for optimization."""
+
+        yield from (
+            (name, parameter)
+            for name, parameter in self.named_parameters()
+            if parameter.requires_grad
+        )
+
+    def oreo_parameters(self) -> Iterator[nn.Parameter]:
+        """Iterate over exactly the parameters intended for optimization."""
+
+        yield from (parameter for _, parameter in self.oreo_named_parameters())
 
     @can_return_tuple
     def forward(
@@ -327,18 +363,16 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         output_kg_diagnostics: bool | None = None,
         assistant_content_start_positions: Tensor | None = None,
         kg_mention_batch: Tensor | None = None,
-        kg_src_positions: Tensor | None = None,
         kg_rel_positions: Tensor | None = None,
         kg_tgt_positions: Tensor | None = None,
-        kg_node_ids: Tensor | None = None,
+        kg_node_embeddings: Tensor | None = None,
+        kg_relation_embeddings: Tensor | None = None,
         kg_node_batch: Tensor | None = None,
         kg_edge_src: Tensor | None = None,
         kg_edge_dst: Tensor | None = None,
         kg_edge_type: Tensor | None = None,
         kg_initial_node_indices: Tensor | None = None,
         kg_initial_entity_probs: Tensor | None = None,
-        kg_entity_link_targets: Tensor | None = None,
-        kg_entity_link_mask: Tensor | None = None,
         kg_relation_targets: Tensor | None = None,
         kg_relation_target_mask: Tensor | None = None,
         **kwargs: Any,
@@ -357,18 +391,16 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             output_kg_diagnostics=output_kg_diagnostics,
             assistant_content_start_positions=resolved_assistant_starts,
             kg_mention_batch=kg_mention_batch,
-            kg_src_positions=kg_src_positions,
             kg_rel_positions=kg_rel_positions,
             kg_tgt_positions=kg_tgt_positions,
-            kg_node_ids=kg_node_ids,
+            kg_node_embeddings=kg_node_embeddings,
+            kg_relation_embeddings=kg_relation_embeddings,
             kg_node_batch=kg_node_batch,
             kg_edge_src=kg_edge_src,
             kg_edge_dst=kg_edge_dst,
             kg_edge_type=kg_edge_type,
             kg_initial_node_indices=kg_initial_node_indices,
             kg_initial_entity_probs=kg_initial_entity_probs,
-            kg_entity_link_targets=kg_entity_link_targets,
-            kg_entity_link_mask=kg_entity_link_mask,
             kg_relation_targets=kg_relation_targets,
             kg_relation_target_mask=kg_relation_target_mask,
             **kwargs,
@@ -390,12 +422,8 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 **kwargs,
             )
 
-        has_entity_supervision = kg_entity_link_targets is not None
         has_relation_supervision = kg_relation_targets is not None
         loss = lm_loss
-        if has_entity_supervision and outputs.entity_link_loss is not None:
-            weighted = self.config.entity_link_loss_weight * outputs.entity_link_loss
-            loss = weighted if loss is None else loss + weighted
         if has_relation_supervision and outputs.relation_loss is not None:
             weighted = self.config.relation_loss_weight * outputs.relation_loss
             loss = weighted if loss is None else loss + weighted
@@ -407,9 +435,7 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             lm_loss=lm_loss,
-            entity_link_loss=outputs.entity_link_loss,
             relation_loss=outputs.relation_loss,
-            entity_link_logits=outputs.entity_link_logits,
             entity_states=outputs.entity_states,
             relation_probs=outputs.relation_probs,
         )
@@ -425,12 +451,12 @@ class OreoQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     ) -> "OreoQwen3ForCausalLM":
         """Load native Qwen weights while newly initializing Oreo parameters.
 
-        ``oreo_config_overrides`` must at least set the intended entity and
-        relation vocabulary sizes. Other Oreo configuration fields, including
+        ``oreo_config_overrides`` must at least set the intended relation
+        vocabulary size. Other Oreo configuration fields, including
         KIL boundaries, may be overridden in the same mapping.
         """
 
-        missing = {"num_entities", "num_relations"} - set(oreo_config_overrides)
+        missing = {"num_relations"} - set(oreo_config_overrides)
         if missing:
             names = ", ".join(sorted(missing))
             raise ValueError(f"oreo_config_overrides is missing: {names}.")
@@ -478,6 +504,32 @@ def register_oreo_tokens_and_resize(
     model.resize_token_embeddings(len(tokenizer))
     if isinstance(model.config, OreoQwen3Config):
         model.config.set_oreo_special_token_ids(token_ids)
+        if isinstance(model, OreoQwen3ForCausalLM):
+            # The delta owns the complete trainable marker representation.
+            # Deterministic semantic base rows make resume behavior independent
+            # of the random initialization used when the vocabulary was resized.
+            with torch.no_grad():
+                embedding_weight = model.model.embed_tokens.weight
+                marker_ids = set(token_ids.all_ids)
+                for token_id, seed_text in zip(
+                    token_ids.all_ids, ("relation", "entity"), strict=True
+                ):
+                    seed_ids = tokenizer.encode(seed_text, add_special_tokens=False)
+                    seed_ids = [
+                        item
+                        for item in seed_ids
+                        if item not in marker_ids and 0 <= item < embedding_weight.shape[0]
+                    ]
+                    if seed_ids:
+                        embedding_weight[token_id].copy_(
+                            embedding_weight[seed_ids].mean(dim=0)
+                        )
+                    else:
+                        embedding_weight[token_id].copy_(embedding_weight.mean(dim=0))
+            # Hugging Face resizing replaces embedding/head Parameters, whose
+            # default requires_grad value is True. Restore the invariant that
+            # every native Qwen parameter is frozen.
+            model.freeze_qwen_backbone()
     else:
         # The benchmark's native-Qwen control uses the same marked text and
         # therefore needs the same resized vocabulary, even though it has no
@@ -489,10 +541,10 @@ def register_oreo_tokens_and_resize(
 
 _KG_REQUIRED_ARGUMENTS = (
     "kg_mention_batch",
-    "kg_src_positions",
     "kg_rel_positions",
     "kg_tgt_positions",
-    "kg_node_ids",
+    "kg_node_embeddings",
+    "kg_relation_embeddings",
     "kg_node_batch",
     "kg_edge_src",
     "kg_edge_dst",

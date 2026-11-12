@@ -169,8 +169,7 @@ class MarkerContextualizationLayer(nn.Module):
         prompt_mask: Tensor,
     ) -> Tensor:
         marker_positions = torch.stack(
-            (kg.kg_src_positions, kg.kg_rel_positions, kg.kg_tgt_positions),
-            dim=1,
+            (kg.kg_rel_positions, kg.kg_tgt_positions), dim=1
         )
         marker_batches = kg.kg_mention_batch[:, None].expand_as(marker_positions)
         marker_states = hidden_states[marker_batches, marker_positions]

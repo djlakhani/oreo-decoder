@@ -6,12 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 
-SOURCE_ENTITY_TOKEN = "<|s_ent|>"
 REL_TOKEN = "<|rel|>"
 TARGET_ENTITY_TOKEN = "<|t_ent|>"
 
 OREO_SPECIAL_TOKENS = (
-    SOURCE_ENTITY_TOKEN,
     REL_TOKEN,
     TARGET_ENTITY_TOKEN,
 )
@@ -21,7 +19,6 @@ OREO_SPECIAL_TOKENS = (
 class OreoSpecialTokenIds:
     """Resolved tokenizer IDs for every Oreo-Qwen special token."""
 
-    source_entity: int
     relation: int
     target_entity: int
 
@@ -37,7 +34,6 @@ class OreoSpecialTokenIds:
     @property
     def all_ids(self) -> tuple[int, ...]:
         return (
-            self.source_entity,
             self.relation,
             self.target_entity,
         )
@@ -46,7 +42,6 @@ class OreoSpecialTokenIds:
         """Return JSON-serializable fields for a future OreoQwen3Config."""
 
         return {
-            "oreo_source_entity_token_id": self.source_entity,
             "oreo_relation_token_id": self.relation,
             "oreo_target_entity_token_id": self.target_entity,
         }
@@ -68,9 +63,8 @@ class OreoSpecialTokenIds:
             raise ValueError("At least one Oreo special token still maps to the unknown token.")
 
         return cls(
-            source_entity=ids[0],
-            relation=ids[1],
-            target_entity=ids[2],
+            relation=ids[0],
+            target_entity=ids[1],
         )
 
 

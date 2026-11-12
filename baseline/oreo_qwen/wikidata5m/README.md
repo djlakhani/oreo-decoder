@@ -374,27 +374,29 @@ Build a bounded range while reviewing the pipeline:
 
 ```bash
 uv run wikidata5m-preprocess build ../../datasets/Wikidata5M \
-  --start-id 0 --stop-id 10000
+  --start-id 0 --stop-id 10000 --workers 4
 ```
 
 The default output is
-`datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2/`. Shards are
+`datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v3/`. Shards are
 deterministic gzip JSONL files over fixed dense entity-ID ranges. Publication is
 atomic, a progress manifest makes completed shards resumable, and the final
 manifest records checksums, counts, rejection reasons, and bounded rejection
-samples. This command can process the full corpus, so do not run it casually.
+samples. Independent shards can be built concurrently; completed results are
+published into a deterministically ordered manifest by the parent process. This
+command can process the full corpus, so do not run it casually.
 
 Inspect corpus statistics and validate artifacts:
 
 ```bash
 uv run wikidata5m-preprocess stats \
-  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v3
 
 uv run wikidata5m-preprocess validate \
-  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v3
 
 uv run wikidata5m-preprocess validate \
-  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v2 \
+  ../../datasets/Wikidata5M/preprocessed/wiki5m_reconstruction_v3 \
   --full --source ../../datasets/Wikidata5M
 ```
 

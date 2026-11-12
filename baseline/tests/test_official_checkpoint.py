@@ -17,16 +17,16 @@ class OfficialQwenCheckpointSmokeTest(unittest.TestCase):
         model = OreoQwen3ForCausalLM.from_qwen3_pretrained(
             "Qwen/Qwen3-4B",
             oreo_config_overrides={
-                "num_entities": 8,
                 "num_relations": 4,
-                "entity_embedding_dim": 8,
+                "knowledge_embedding_dim": 8,
+                "adapter_bottleneck_dim": 8,
             },
             dtype=torch.bfloat16,
         ).eval()
         with torch.no_grad():
             output = model(input_ids=torch.tensor([[1, 2]]), use_cache=False)
         self.assertEqual(output.logits.shape[:2], (1, 2))
-        self.assertEqual(model.config.kil_layer_boundaries, [12, 24])
+        self.assertEqual(model.config.kil_layer_boundaries, [34])
 
 
 if __name__ == "__main__":

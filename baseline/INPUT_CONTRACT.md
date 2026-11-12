@@ -1,459 +1,265 @@
 # OreoLM–Qwen Input Contract
 
-## Purpose and Notation
+## Architecture Summary
 
-This document specifies the public tensor interface between preprocessing,
-batching, the KG reasoner, and the Qwen language model. The contract is designed
-so a batch can be passed as keyword arguments to `OreoQwen3ForCausalLM`.
+The first prototype uses one Knowledge Interaction Layer (KIL), placed after
+completed Qwen layer 34 in the 36-layer Qwen3-4B backbone:
+
+```text
+Qwen layers 1–34
+    → prompt-only REL/T_ENT contextualization
+    → one differentiable graph walk over an externally linked local graph
+    → frozen entity embedding → trainable bottleneck → T_ENT
+    → strict preceding-T_ENT broadcast
+    → Qwen layers 35–36
+```
+
+The model owns no entity or relation embedding table and performs no entity
+linking. A frozen embedding encoder runs outside `OreoQwen3ForCausalLM`; the
+batch supplies already resolved embedding tensors. The native Qwen backbone,
+vocabulary embeddings, final norm, and LM head are frozen. Only Oreo adapters,
+interaction layers, the relation temperature, and two marker-token deltas are
+trainable.
 
 Notation:
 
 | Symbol | Meaning |
 |---|---|
-| `B` | Number of language-model examples in the batch |
-| `L` | Padded token-sequence length |
-| `M` | Number of marked KG mentions/queries across the batch |
-| `V` | Number of nodes across the batch's disjoint-union local graph |
-| `E` | Number of edges across the disjoint-union local graph |
-| `R` | Number of relation types in relation memory |
-| `T` | Number of KIL steps, equal to the number of KIL boundaries |
+| `B` | Language examples |
+| `L` | Padded token length |
+| `M` | Marked graph mentions |
+| `V` | Nodes in the batch's disjoint-union local graph |
+| `E` | Edges in that graph |
+| `R` | Global relation count |
+| `D` | Frozen knowledge embedding width |
+| `T` | KIL steps; `T = 1` by default |
 
-The local graph uses one flattened node-index space `[0, V)`. Dataset-level
-entity IDs are used only to look up rows in the global entity embedding table.
-
-## Language-Model Tensors
+## Language Tensors
 
 | Name | Shape | Type | Required | Meaning |
 |---|---:|---|---|---|
-| `input_ids` | `[B, L]` | `torch.long` | Yes unless `inputs_embeds` is used | Tokenizer IDs for the complete teacher-forced sequence |
-| `attention_mask` | `[B, L]` | bool or integer | Recommended | `1` for real tokens and `0` for padding |
-| `labels` | `[B, L]` | `torch.long` | Training only | Token IDs at supervised positions and `-100` elsewhere |
-| `assistant_content_start_positions` | `[B]` | `torch.long` | Optional; inferred from `labels` by the LM wrapper | First supervised assistant-content token in each sequence and exclusive end of pre-KIL prompt memory |
+| `input_ids` | `[B, L]` | `torch.long` | Unless `inputs_embeds` is used | Complete prompt or teacher-forced sequence |
+| `attention_mask` | `[B, L]` | bool/integer | Recommended | Active-token mask |
+| `labels` | `[B, L]` | `torch.long` | Training only | Supervised IDs or `-100` |
+| `assistant_content_start_positions` | `[B]` | `torch.long` | Optional | First assistant-content token |
 
-The model uses Hugging Face's standard shifted causal loss: the logit at position
-`i - 1` predicts `labels[:, i]`. System, user, assistant-header, and padding
-positions use `-100`. Assistant content and its terminating EOS token are
-supervised. The tensor is forwarded to `model.forward` because it defines the
-pre-KIL attention boundary that prevents teacher-forced answer leakage. If
-`labels` are supplied and this tensor is omitted, the causal-LM wrapper infers
-each row's boundary from its first label other than `-100`. For prompt-only
-generation, both are omitted and every active input token is prompt memory.
+When labels are supplied without explicit assistant starts, the LM wrapper uses
+the first label other than `-100`. This boundary prevents pre-KIL marker queries
+from reading teacher-forced answers. During prompt-only generation, labels and
+starts are omitted and every active input token is prompt memory.
 
-When both `input_ids` and `inputs_embeds` are supplied, validation fails. When
-`attention_mask` is omitted, the usual Qwen all-visible non-padding default is
-used.
+## Markers
 
-## Mention and Token-Position Tensors
-
-| Name | Shape | Type | Required with KG | Meaning |
-|---|---:|---|---|---|
-| `kg_mention_batch` | `[M]` | `torch.long` | Yes | Batch-example index owning each mention |
-| `kg_src_positions` | `[M]` | `torch.long` | Yes | Position of each `<|s_ent|>` token |
-| `kg_rel_positions` | `[M]` | `torch.long` | Yes | Position of each `<|rel|>` token |
-| `kg_tgt_positions` | `[M]` | `torch.long` | Yes | Position of each `<|t_ent|>` token receiving fused knowledge |
-
-For mention `m`, the hidden states are addressed by the pairs:
+Only two additional special tokens are registered:
 
 ```text
-source query:   hidden_states[kg_mention_batch[m], kg_src_positions[m]]
-relation query: hidden_states[kg_mention_batch[m], kg_rel_positions[m]]
-fusion target:  hidden_states[kg_mention_batch[m], kg_tgt_positions[m]]
-```
-
-Positions must be in `[0, L)`, point to non-padding tokens, and contain their
-configured marker token IDs when `input_ids` are available. Target `(batch,
-position)` pairs must be unique so two mentions do not perform ambiguous writes
-to the same hidden-state row. When an assistant-content boundary is available,
-all three marker positions must occur strictly before it.
-
-The target position is explicit. The implementation must not infer it as
-`kg_rel_positions + 1`, even if the standard serialization places the two tokens
-next to one another.
-
-## Attention Around Each KIL
-
-At every configured boundary, computation is:
-
-```text
-Qwen hidden states
-    -> prompt-only marker contextualization
-    -> KIL graph reasoning and T_ENT fusion
-    -> strict preceding-T_ENT broadcast
-    -> next Qwen layer group
-```
-
-The pre-KIL layer updates only the `S_ENT`, `REL`, and `T_ENT` rows. Each marker
-query can attend bidirectionally to all active prompt positions in its own batch
-example. It cannot attend to assistant content at or after
-`assistant_content_start_positions`.
-
-The post-KIL layer updates a token only from `T_ENT` positions with a smaller
-sequence index. It does not expose ordinary token rows as attention memory, and
-`T_ENT` does not attend to itself. Its residual branch produces exactly zero
-when no eligible marker precedes the query, leaving that query unchanged. Both
-layers use the same grouped-query head counts and head dimension as the Qwen
-checkpoint, with branch pre-normalization and zero-initialized residual gates.
-
-## Disjoint-Union Local Graph
-
-| Name | Shape | Type | Required with KG | Meaning |
-|---|---:|---|---|---|
-| `kg_node_ids` | `[V]` | `torch.long` | Yes | Dense global entity-memory row for each local node |
-| `kg_node_batch` | `[V]` | `torch.long` | Yes | Batch-example index owning each local node |
-| `kg_edge_src` | `[E]` | `torch.long` | Yes | Flattened local source-node index |
-| `kg_edge_dst` | `[E]` | `torch.long` | Yes | Flattened local destination-node index |
-| `kg_edge_type` | `[E]` | `torch.long` | Yes | Dense relation-memory row for each edge |
-
-`kg_node_batch[v]` identifies which example owns flattened node `v`. It is what
-allows several differently sized graphs to share one batch without padding them
-to `[B, V_max, V_max]`.
-
-The graph must satisfy these invariants:
-
-- `kg_node_ids` is in `[0, num_entities)`.
-- `kg_node_batch` and `kg_mention_batch` are in `[0, B)`.
-- Edge endpoints are in `[0, V)`.
-- Relation IDs are in `[0, num_relations)`.
-- Every edge's source and destination have the same `kg_node_batch` value.
-- Every mention has at least one node belonging to its batch example.
-- Empty edge tensors are permitted; the walk then uses its all-zero-score
-  fallback.
-
-All edges use the flattened node space. When batching example graphs, the
-collator must add the example's cumulative node offset to both endpoint arrays.
-
-## Entity-State Initialization
-
-There are three supported initialization modes, in priority order. Supplying
-both hard and soft initialization is an error rather than an implicit
-precedence rule.
-
-### Hard linked entities
-
-| Name | Shape | Type | Meaning |
-|---|---:|---|---|
-| `kg_initial_node_indices` | `[M]` | `torch.long` | One flattened local node index per mention |
-
-Each selected node must belong to the same batch example as the corresponding
-mention. The reasoner converts these indices to one-hot rows in `[M, V]`.
-
-### External soft state
-
-| Name | Shape | Type | Meaning |
-|---|---:|---|---|
-| `kg_initial_entity_probs` | `[M, V]` | floating point | Probability distribution over flattened local nodes |
-
-Rows must be finite, nonnegative, sum to one within tolerance, and contain zero
-mass on nodes owned by other examples. An upstream top-k linker can be supported
-by scattering its candidates into this dense local representation.
-
-### Learned entity predictor
-
-If neither initialization tensor is supplied, the reasoner projects each source
-marker hidden state and scores the raw embeddings of nodes owned by that
-mention's example. Nodes in other examples are masked before softmax.
-
-## Auxiliary Supervision
-
-Entity initialization and entity-link supervision are deliberately separate.
-An externally initialized state may still supervise the learned entity
-predictor.
-
-| Name | Shape | Type | Required | Meaning |
-|---|---:|---|---|---|
-| `kg_entity_link_targets` | `[M]` | `torch.long` | Optional | Correct flattened local node for each mention |
-| `kg_entity_link_mask` | `[M]` | bool | With entity targets | Mentions included in entity-link loss |
-| `kg_relation_targets` | `[T, M, R]` | floating point | Optional | Per-step target relation distributions |
-| `kg_relation_target_mask` | `[T, M]` | bool | With relation targets | Step/mention pairs included in relation loss |
-
-An entity target must belong to the same graph component as its mention.
-Relation-target rows selected by the mask must be finite, nonnegative, and sum
-to one. This supports one-hot labels and uniform distributions over multiple
-valid relations.
-
-The relation tensor's first dimension must equal the configured number of KIL
-steps. A missing target tensor or an all-false loss mask produces a
-differentiable scalar zero for that auxiliary loss.
-
-## Complete Two-Example QA Batch
-
-Suppose both questions require two hops:
-
-```text
-Example 0:
-user: Where was Albert Einstein <|s_ent|> <|rel|> <|t_ent|>
-      born, and in which country is that city?
-assistant: Germany EOS
-
-Example 1:
-user: Where was Marie Curie <|s_ent|> <|rel|> <|t_ent|>
-      born, and in which country is that city?
-assistant: Poland EOS
-```
-
-The local graphs are:
-
-```text
-Einstein --P19/place of birth--> Ulm --P17/country--> Germany
-Curie    --P19/place of birth--> Warsaw --P17/country--> Poland
-```
-
-For illustration, the dense entity-memory rows are arbitrary small numbers:
-
-| Flat node | Entity-memory ID | Label | `kg_node_batch` |
-|---:|---:|---|---:|
-| 0 | 101 | Einstein | 0 |
-| 1 | 205 | Ulm | 0 |
-| 2 | 310 | Germany | 0 |
-| 3 | 402 | Curie | 1 |
-| 4 | 510 | Warsaw | 1 |
-| 5 | 611 | Poland | 1 |
-
-The graph tensors are:
-
-```python
-kg_node_ids = torch.tensor([101, 205, 310, 402, 510, 611])
-kg_node_batch = torch.tensor([0, 0, 0, 1, 1, 1])
-
-# Relation 0 is P19; relation 1 is P17.
-kg_edge_src = torch.tensor([0, 1, 3, 4])
-kg_edge_dst = torch.tensor([1, 2, 4, 5])
-kg_edge_type = torch.tensor([0, 1, 0, 1])
-```
-
-Assume the illustrative tokenization gives the following marker positions in
-both sequences:
-
-```text
-position:  0     1    2       3         4          5       6
-token:     Where was  Albert  Einstein  <|s_ent|>  <|rel|> <|t_ent|>
-```
-
-Then:
-
-```python
-kg_mention_batch = torch.tensor([0, 1])
-kg_src_positions = torch.tensor([4, 4])
-kg_rel_positions = torch.tensor([5, 5])
-kg_tgt_positions = torch.tensor([6, 6])
-
-kg_initial_node_indices = torch.tensor([0, 3])
-
-kg_entity_link_targets = torch.tensor([0, 3])
-kg_entity_link_mask = torch.tensor([True, True])
-
-kg_relation_targets = torch.tensor([
-    [[1.0, 0.0], [1.0, 0.0]],  # KIL 0: P19
-    [[0.0, 1.0], [0.0, 1.0]],  # KIL 1: P17
-])
-kg_relation_target_mask = torch.tensor([
-    [True, True],
-    [True, True],
-])
-```
-
-The equivalent soft initialization is:
-
-```python
-kg_initial_entity_probs = torch.tensor([
-    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-])
-```
-
-It is supplied instead of, not alongside, `kg_initial_node_indices`.
-
-`input_ids`, `attention_mask`, and `labels` have shape `[2, L]`. For example 0,
-all system, user, and assistant-header labels are `-100`; the token or tokens
-encoding `Germany` and the final EOS are supervised. Example 1 treats `Poland`
-the same way. Exact positions, including
-`assistant_content_start_positions`, are derived after chat-template
-tokenization rather than hard-coded from the human-readable string.
-
-## Two-Stage Training Contract
-
-There are exactly two supported training stages:
-
-1. Salient-span reconstruction pretraining over the span-corrupted Wikipedia
-   corpus.
-2. Benchmark-specific adaptive QA fine-tuning over datasets such as
-   NaturalQuestions.
-
-The two stages use the same model forward interface and graph tensors. They
-differ only in textual serialization, label masking, availability of auxiliary
-targets, and checkpoint initialization.
-
-## Serialization and Special Tokens
-
-Register these additional special tokens:
-
-```text
-<|s_ent|>
 <|rel|>
 <|t_ent|>
 ```
 
-The tokenizer's existing EOS and padding conventions are retained. After token
-registration, the model's tied input embedding and LM-head vocabulary is
-resized, and the resulting three token IDs are persisted in `OreoQwen3Config`.
-Reconstruction blanks such as `[BLANK_0]` use ordinary tokenizer vocabulary;
-task and response boundaries come from Qwen's instruct chat template.
-
-### Stage 1: salient-span reconstruction pretraining
+Every visible linked mention is serialized as:
 
 ```text
-system: Reconstruct each numbered blank. Return only each blank identifier
-        followed by its original text, in numerical order.
-user: <marked passage containing unique [BLANK_i] identifiers>
-assistant: [BLANK_0] <span 0>
-           [BLANK_1] <span 1> ... EOS
+entity surface <|rel|> <|t_ent|>
 ```
 
-The model's instruct chat template supplies the role/control tokens. All system,
-user, and assistant-header tokens have label `-100`. Every assistant-content
-token, beginning with `[BLANK_0]`, is supervised. This includes each textual
-blank identifier, the exact removed surface tokens, and EOS. The collator
-records the first such token in `assistant_content_start_positions`.
+The source marker is unnecessary because preprocessing supplies the linked
+initial local node. `REL` is the contextual query used to select a relation;
+`T_ENT` receives the retrieved entity value.
 
-Every visible resolved entity occurrence is serialized in this order:
+The complete native Qwen embedding table remains frozen. A trainable
+`[2, hidden_size]` delta is added only at `REL` and `T_ENT` input positions, so
+training the two new markers cannot update ordinary vocabulary rows or the tied
+LM head.
+
+| Name | Shape | Type | Meaning |
+|---|---:|---|---|
+| `kg_mention_batch` | `[M]` | `torch.long` | Batch row owning each mention |
+| `kg_rel_positions` | `[M]` | `torch.long` | `REL` token positions |
+| `kg_tgt_positions` | `[M]` | `torch.long` | `T_ENT` token positions |
+
+Positions must be active, point to the configured marker ID, and occur before
+assistant content. `(batch, T_ENT position)` pairs must be unique.
+
+## Frozen Knowledge Embeddings
+
+| Name | Shape | Type | Meaning |
+|---|---:|---|---|
+| `kg_node_embeddings` | `[V, D]` | floating | Frozen embeddings for only the local nodes in this batch |
+| `kg_relation_embeddings` | `[R, D]` | floating | Frozen relation bank |
+
+Both tensors must be finite and on the language-input device. They are ordinary
+inputs, not parameters or persistent model buffers. The reasoner normalizes
+them before use. The default provenance stored in configuration is
+`Qwen/Qwen3-Embedding-0.6B`, with `D = 384` and a 512-wide trainable bottleneck.
+
+`FrozenKnowledgeEmbedder` is an external helper. It batches cache misses under
+inference mode, keeps a bounded detached CPU hot cache, optionally persists
+vectors in SQLite, and returns only the requested rows. The encoder must not be
+placed in an optimizer or in the Oreo checkpoint.
+Relation embeddings may be computed once because Wikidata5M has only 828
+relations. Entity embeddings should be resolved on demand or precomputed only
+for the union of entities used by the experiment.
+
+Recommended entity text includes label, short description, types, and aliases.
+Recommended relation text includes label, description, and direction semantics.
+
+## Disjoint-Union Graph
+
+| Name | Shape | Type | Meaning |
+|---|---:|---|---|
+| `kg_node_batch` | `[V]` | `torch.long` | Example owning each local node |
+| `kg_edge_src` | `[E]` | `torch.long` | Flattened local source index |
+| `kg_edge_dst` | `[E]` | `torch.long` | Flattened local destination index |
+| `kg_edge_type` | `[E]` | `torch.long` | Row in `kg_relation_embeddings` |
+
+Edges may not cross example components. When collating graphs, both endpoint
+arrays receive the cumulative local-node offset; edge types remain relation-bank
+indices. Empty edge tensors are valid and trigger the walk's retain-state
+fallback.
+
+Dataset entity IDs/QIDs remain preprocessing and embedding-cache metadata. They
+are not passed to the model as `kg_node_ids`.
+
+## Required External Initialization
+
+Exactly one initialization form is required:
+
+| Name | Shape | Type | Meaning |
+|---|---:|---|---|
+| `kg_initial_node_indices` | `[M]` | `torch.long` | Externally linked local node per mention |
+| `kg_initial_entity_probs` | `[M, V]` | floating | External distribution over local nodes |
+
+Hard indices must belong to the mention's example. Soft rows must be finite,
+nonnegative, sum to one, and assign no probability outside that component.
+There is no learned fallback and no entity-linking loss.
+
+## Relation Supervision
+
+| Name | Shape | Type | Required | Meaning |
+|---|---:|---|---|---|
+| `kg_relation_targets` | `[T, M, R]` | floating | Optional | Gold/weak relation distributions |
+| `kg_relation_target_mask` | `[T, M]` | bool | With targets | Supervised step/mention pairs |
+
+Selected rows must be probability distributions. The relation-query bottleneck
+produces a normalized vector in the frozen relation space. Cosine scores use a
+trainable temperature before softmax. Soft-target cross entropy is equivalent
+to minimizing `KL(target || predicted)` up to the target entropy.
+
+## KIL Computation
+
+For one step:
 
 ```text
-entity surface <|s_ent|> <|rel|> <|t_ent|>
+REL hidden state
+    → RMSNorm → 512 bottleneck → D-dimensional normalized query
+    → cosine scores against frozen relation embeddings
+    → relation probabilities
+    → fixed inverse-degree graph walk
+    → weighted sum of frozen node embeddings
+    → RMSNorm → 512 bottleneck → Qwen hidden width
+    → residual fusion into T_ENT → RMSNorm
 ```
 
-Masked entity occurrences and context-only blanks contain only their unique
-textual blank identifier; they have no surrounding KG markers.
+The graph walk remains the fixed global inverse-out-degree walk. If all outgoing
+edge scores are zero, the previous entity distribution is retained.
 
-For example:
+## Interaction Layers
+
+The pre-KIL layer gathers `REL` and `T_ENT` as queries. They attend
+bidirectionally to active prompt tokens, but only the two marker rows are
+updated. Assistant content is excluded during teacher forcing.
+
+The post-KIL layer exposes only strictly preceding `T_ENT` rows as memory. A
+query with no preceding `T_ENT` receives an exact zero branch and is unchanged.
+Both interaction layers use Qwen's grouped-query head geometry, branch
+pre-normalization, residual connections, and zero-initialized scalar gates.
+
+## Losses and Outputs
+
+The training objective is:
 
 ```text
-user: Albert Einstein <|s_ent|> <|rel|> <|t_ent|> was born in
-      [BLANK_0]. [BLANK_1] is located in Germany.
-assistant: [BLANK_0] Ulm
-           [BLANK_1] Ulm EOS
+total_loss = lm_loss + relation_loss_weight * relation_loss
 ```
 
-The two occurrences of `Ulm` receive different sentinels even though they link
-to the same entity. Stage-1 training reconstructs exactly what the source text
-contained; aliases are not alternate training labels. The Wikidata5M
-preprocessor defined in `PREPROCESS_WIKI5M.md` discovers mentions from the
-indexed passage, local train graph, and candidate aliases. It does not assume
-that hyperlink annotations already exist. Its character-level record must be
-retokenized with the Qwen tokenizer, and all token positions and labels must be
-built after chat serialization and any tokenizer-budgeted crop.
+There is no entity-linking objective. Without relation targets, answer or
+reconstruction loss still trains the relation adapter through the soft graph
+walk and trains the entity-value adapter through `T_ENT` fusion.
 
-Core KG tensors are required in this stage. Entity-link and relation-path targets
-are supplied when the preprocessing pipeline can derive them.
+`OreoQwen3ForCausalLM` freezes native Qwen parameters during construction and
+again after vocabulary resizing. Optimizers must consume
+`model.oreo_parameters()` (or equivalently filter on `requires_grad`) rather
+than all model parameters. Frozen decoder operations remain in the autograd
+graph where necessary to propagate gradients to Oreo parameters, but their own
+parameter gradients stay absent.
 
-Stage-1 evaluation metadata stays outside `model.forward`. Each sentinel stores
-its exact removed text, mask kind, and optional gold QID. A separate evaluator
-may report exact-surface, normalized-text, alias-aware, format-validity, and
-per-mask-kind accuracy. Alias-aware scoring resolves a prediction against the
-gold QID's aliases; it does not change teacher-forced reconstruction loss or add
-aliases to model tensors.
-
-### Stage 2: benchmark adaptive QA fine-tuning
+The causal-LM output adds:
 
 ```text
-system: Answer the question concisely.
-user: <marked question>
-assistant: <answer> EOS
+lm_loss
+relation_loss
+entity_states       # optional initial and post-walk distributions
+relation_probs      # optional relation distribution per KIL
 ```
 
-The complete system/user prompt and assistant header have label `-100`. Every
-answer token and EOS is supervised. Questions must be entity-linked, marked
-with the source/relation/target tokens, and paired with a local graph before
-they enter the Oreo-Qwen collator.
+## Cached Generation
 
-Benchmark QA data does not need gold relation paths. Entity-link and relation
-supervision tensors are optional during adaptive fine-tuning; when absent, their
-losses are zero and answer loss trains the KIL path end to end.
+Pre-KIL contextualization and graph traversal run once during prompt prefill.
+Post-KIL attention maintains its own KV cache and continues on generated tokens
+so they can read prompt `T_ENT` states. KG graph and marker tensors remain in
+generation kwargs, while frozen embeddings are treated as read-only inputs.
 
-The raw-Qwen control is independently fine-tuned on the same benchmark examples.
-For the primary controlled comparison, it receives the same marked token text
-and chat serialization but no `kg_*` tensors. Its labels and optimization budget
-match Oreo-Qwen. An additional plain-question control can be produced as an
-ablation without changing this two-stage contract.
+The initial supported generation mode remains deterministic greedy decoding;
+beam-specific graph expansion is deferred.
 
-## Optionality
+## Dataset and Semantic Collation
 
-- A completely graph-free batch omits every `kg_*` argument. The model skips all
-  KIL work and auxiliary losses. This is used by the raw-Qwen control, not by
-  Oreo-Qwen's two KG-conditioned training stages.
-- If any core KG tensor is provided, all mention, position, node, and edge core
-  tensors must be provided, even when `E == 0`.
-- Auxiliary supervision is optional at evaluation and generation time.
-- `labels` are optional outside training.
+`Wikidata5MReconstructionDataset` streams the v3 gzipped JSONL shards and
+joins each record to its canonical passage and entity aliases through the
+immutable Wiki5M index. It does not retain an open datastore handle, and it
+assigns whole shards across distributed ranks and DataLoader workers.
 
-## Forward Output Contract
+`OreoSemanticCollator` is CPU-only. It:
 
-The causal-LM wrapper will return the normal Qwen causal-LM fields plus:
+1. renders blanks and Oreo markers;
+2. applies the tokenizer's instruct chat template with thinking disabled by
+   default;
+3. right-pads the batch and supervises only assistant answer tokens;
+4. finds the tokenized `REL` and `T_ENT` positions;
+5. combines local graphs into a disjoint union and offsets node indices;
+6. binds every visible marker mention to its externally linked local node;
+7. derives one-step relation targets from the preprocessing support edges; and
+8. emits stable entity embedding requests in flattened node order.
 
-```text
-loss                 # weighted total loss, when any objective is active
-lm_loss              # shifted causal-language-model loss or None
-entity_link_loss     # scalar; differentiable zero when unsupervised
-relation_loss        # scalar; differentiable zero when unsupervised
-entity_states        # optional tuple of [M, V], one per KIL
-relation_probs       # optional tuple of [M, R], one per KIL
+It returns `SemanticOreoBatch`, not `OreoQwenBatch`, because embedding inference
+must not run in DataLoader workers. The main process resolves the requests and
+materializes the model batch:
+
+```python
+semantic = next(iter(loader))
+
+node_vectors = embedder.resolve(
+    semantic.kg.node_embedding_keys,
+    semantic.kg.node_embedding_texts,
+    output_device=train_device,
+)
+model_batch = semantic.materialize(
+    node_embeddings=node_vectors,
+    relation_embeddings=relation_bank,
+    device=train_device,
+)
+outputs = model(**model_batch.as_model_kwargs())
 ```
 
-Diagnostics are returned only when enabled, to avoid retaining large
-intermediate tensors during normal training.
+The full relation bank can be initialized once from
+`dataset.relation_embedding_requests()`. Entity request text currently uses the
+first Wiki5M alias as its label and remaining aliases as additional names. The
+request key includes a text-format version so a future formatting change does
+not silently reuse stale cached vectors.
 
-## Inference and Benchmark Evaluation Contract
-
-Benchmark evaluation uses the same fine-tuned `OreoQwen3ForCausalLM` class as
-training. The distinction is the inputs and execution mode, not a separate model
-architecture.
-
-For each Oreo-Qwen evaluation example:
-
-1. Entity-link and mark the question exactly as during adaptive fine-tuning.
-2. Build the local graph and core KG tensors.
-3. Apply the instruct chat template with an assistant generation prompt; do not
-   append a gold answer.
-4. Omit `labels`, entity-link targets, and relation targets.
-5. Call `model.eval()` and `model.generate(...)` under inference mode.
-6. Slice off the input prompt IDs, stop at EOS, and decode only newly generated
-   answer tokens.
-7. Normalize and score the decoded answer with the benchmark's official metric
-   against every accepted gold answer/alias.
-
-The generation call initially uses deterministic greedy decoding:
-
-```text
-do_sample = False
-use_cache = True
-max_new_tokens = configured per benchmark
-eos_token_id = tokenizer EOS
-pad_token_id = tokenizer padding ID
-```
-
-KG reasoning and pre-KIL contextualization run once during prompt prefill. The
-KG position tensors remain available during cached single-token decoding so the
-post-KIL adapters can identify target-marker cache rows. Each post-KIL adapter
-caches its prompt keys and values and continues to run for generated tokens;
-its strict mask still exposes only preceding `T_ENT` positions. Generated
-sequences returned by Hugging Face include the prompt, so answer extraction
-begins at the padded input width returned to `generate`, not at a hard-coded
-textual position.
-
-The raw-Qwen control uses its separately fine-tuned checkpoint, the same textual
-prompt and chat template, the same decoding configuration, and the same answer
-extraction and metric code. It omits all KG tensors and uses the ordinary Qwen
-generation path.
-
-Evaluation records also carry non-model metadata outside `model.forward`, at
-minimum:
-
-```text
-example_id
-gold_answers       # all accepted answers/aliases
-raw_question
-```
-
-Prediction artifacts contain the example ID, rendered prompt, decoded prediction,
-gold-answer list, and optional Oreo reasoning diagnostics. Teacher-forced QA loss
-may be reported as a diagnostic on a validation split, but benchmark answer
-quality is measured from generated answers without exposing the gold suffix.
+`max_length` never causes token-level truncation. The strict collator rejects an
+overlength record; the production training configuration drops that complete
+record and continues. Blind token truncation could detach marker positions,
+source nodes, graph supervision, and answers from one another; a future
+record-aware cropping policy must update all of those structures together.

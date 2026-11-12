@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -38,8 +39,25 @@ def _build(args: argparse.Namespace) -> None:
     output = (
         Path(args.output).expanduser().resolve()
         if args.output
-        else source / "preprocessed" / "wiki5m_reconstruction_v2"
+        else source / "preprocessed" / "wiki5m_reconstruction_v3"
     )
+    started = time.monotonic()
+
+    def report(processed: int, total: int, records: int) -> None:
+        elapsed = max(time.monotonic() - started, 1e-6)
+        rate = processed / elapsed
+        remaining = max(total - processed, 0)
+        eta = remaining / rate if rate else float("inf")
+        percent = 100.0 * processed / max(total, 1)
+        print(
+            f"\rpreprocess {processed:,}/{total:,} ({percent:5.1f}%) "
+            f"accepted={records:,} rate={rate:,.1f} entities/s "
+            f"eta={eta / 3600:.2f}h",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+
     with Wikidata5MStore(source / "indexed", source_root=source) as store:
         result = build_preprocessed_corpus(
             store,
@@ -48,7 +66,10 @@ def _build(args: argparse.Namespace) -> None:
             start_entity_id=args.start_entity_id,
             stop_entity_id=args.stop_entity_id,
             force=args.force,
+            workers=args.workers,
+            progress_callback=report,
         )
+    print(file=sys.stderr)
     print(result)
 
 
@@ -122,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--start-id", "--start-entity-id", dest="start_entity_id", type=int, default=0)
     build.add_argument("--stop-id", "--stop-entity-id", dest="stop_entity_id", type=int)
     build.add_argument("--force", action="store_true")
+    build.add_argument("--workers", type=int, default=1)
     _add_config_arguments(build)
     build.set_defaults(handler=_build)
 
